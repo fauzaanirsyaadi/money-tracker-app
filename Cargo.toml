@@ -21,6 +21,8 @@ print_stderr = "deny"
 
 # Optimisation guideline: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
+# Money arithmetic must never wrap silently; an overflow aborts instead.
+overflow-checks = true
 codegen-units = 1
 lto = true
 opt-level = 3

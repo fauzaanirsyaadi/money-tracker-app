@@ -8,6 +8,8 @@ pub enum StorageError {
     WrongKeyOrCorrupt,
     /// The database was written by a newer app version.
     SchemaTooNew { found: u32, supported: u32 },
+    /// The linked SQLite has no SQLCipher: refusing to create an unencrypted file.
+    EncryptionUnavailable,
     /// A constraint (CHECK, UNIQUE, FOREIGN KEY, NOT NULL) rejected a write.
     Constraint,
     /// Any other SQLite failure, identified by its extended result code only.
@@ -24,6 +26,7 @@ impl fmt::Display for StorageError {
                     "database schema {found} is newer than supported {supported}"
                 )
             }
+            Self::EncryptionUnavailable => f.write_str("sqlcipher is not available"),
             Self::Constraint => f.write_str("constraint violated"),
             Self::Sqlite { code } => write!(f, "sqlite error {code}"),
         }

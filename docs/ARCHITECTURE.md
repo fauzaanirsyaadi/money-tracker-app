@@ -96,19 +96,26 @@ Mata uang v1: lihat keputusan K1 (bagian 12).
 Konvensi: tabel `STRICT`, `PRAGMA foreign_keys=ON`, `PRAGMA journal_mode=WAL`, `PRAGMA secure_delete=ON`. Semua jumlah `INTEGER` minor unit. Tanggal transaksi disimpan sebagai tanggal kalender lokal (`'YYYY-MM-DD'`).
 
 ```sql
+-- Schema v1. See docs/ARCHITECTURE.md section 5 for the rationale.
+--
+-- Money columns are bounded to +/-(2^53 - 1), the same range mt-core enforces,
+-- so SQL and Rust always agree. Dates must be canonical 'YYYY-MM-DD'.
+
 CREATE TABLE settings (
-  key TEXT PRIMARY KEY, value TEXT NOT NULL
-) STRICT;                               -- currency, schema info, pengaturan UI
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
 
 CREATE TABLE accounts (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
   kind TEXT NOT NULL CHECK (kind IN ('cash','bank','ewallet')),
-  currency TEXT NOT NULL,                       -- ISO 4217
-  opening_balance_minor INTEGER NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL,
+  opening_balance_minor INTEGER NOT NULL DEFAULT 0
+    CHECK (opening_balance_minor BETWEEN -9007199254740991 AND 9007199254740991),
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
   sort_order INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL                   -- unix detik UTC
+  created_at INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE categories (
@@ -116,48 +123,55 @@ CREATE TABLE categories (
   name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
   kind TEXT NOT NULL CHECK (kind IN ('income','expense')),
   parent_id INTEGER REFERENCES categories(id) ON DELETE RESTRICT,
-  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1))
-) STRICT;                                       -- kedalaman maks 1 level, dijaga di core
+  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+  CHECK (parent_id IS NULL OR parent_id <> id)
+) STRICT;
 
 CREATE TABLE recurring_rules (
   id INTEGER PRIMARY KEY,
   account_id INTEGER NOT NULL REFERENCES accounts(id),
   category_id INTEGER NOT NULL REFERENCES categories(id),
   kind TEXT NOT NULL CHECK (kind IN ('income','expense')),
-  amount_minor INTEGER NOT NULL,                -- bertanda, sama seperti transactions
+  amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN -9007199254740991 AND 9007199254740991),
   note TEXT NOT NULL DEFAULT '',
   freq TEXT NOT NULL CHECK (freq IN ('daily','weekly','monthly','yearly')),
   every_n INTEGER NOT NULL DEFAULT 1 CHECK (every_n >= 1),
-  anchor_day INTEGER NOT NULL CHECK (anchor_day BETWEEN 1 AND 31), -- jaga "tanggal 31" saat bulan pendek
+  anchor_day INTEGER NOT NULL CHECK (anchor_day BETWEEN 1 AND 31),
   start_on TEXT NOT NULL,
   end_on TEXT,
   next_due TEXT NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1))
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  CHECK ((kind = 'income' AND amount_minor > 0) OR (kind = 'expense' AND amount_minor < 0)),
+  CHECK (date(start_on) IS start_on),
+  CHECK (end_on IS NULL OR date(end_on) IS end_on),
+  CHECK (date(next_due) IS next_due)
 ) STRICT;
 
 CREATE TABLE transactions (
   id INTEGER PRIMARY KEY,
   account_id INTEGER NOT NULL REFERENCES accounts(id),
   category_id INTEGER REFERENCES categories(id),
-  amount_minor INTEGER NOT NULL,                -- bertanda: masuk > 0, keluar < 0
+  amount_minor INTEGER NOT NULL CHECK (amount_minor BETWEEN -9007199254740991 AND 9007199254740991),
   kind TEXT NOT NULL CHECK (kind IN ('income','expense','transfer_out','transfer_in')),
   note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 500),
-  occurred_on TEXT NOT NULL,                    -- 'YYYY-MM-DD'
-  transfer_group_id INTEGER,                    -- = id baris transfer_out
+  occurred_on TEXT NOT NULL,
+  transfer_group_id INTEGER REFERENCES transactions(id),
   recurring_rule_id INTEGER REFERENCES recurring_rules(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
   CHECK ((kind IN ('income','transfer_in')  AND amount_minor > 0)
       OR (kind IN ('expense','transfer_out') AND amount_minor < 0)),
   CHECK ((kind IN ('transfer_out','transfer_in'))
          = (transfer_group_id IS NOT NULL AND category_id IS NULL)),
-  CHECK (kind IN ('transfer_out','transfer_in') OR category_id IS NOT NULL)
+  CHECK (kind IN ('transfer_out','transfer_in') OR category_id IS NOT NULL),
+  CHECK (date(occurred_on) IS occurred_on)
 ) STRICT;
 
 CREATE TABLE budgets (
   id INTEGER PRIMARY KEY,
   category_id INTEGER NOT NULL REFERENCES categories(id),
-  month TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
-  limit_minor INTEGER NOT NULL CHECK (limit_minor > 0),
+  month TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'
+                             AND date(month || '-01') IS month || '-01'),
+  limit_minor INTEGER NOT NULL CHECK (limit_minor > 0 AND limit_minor <= 9007199254740991),
   UNIQUE (category_id, month)
 ) STRICT;
 
@@ -166,6 +180,38 @@ CREATE INDEX idx_tx_account  ON transactions(account_id, occurred_on);
 CREATE INDEX idx_tx_category ON transactions(category_id, occurred_on);
 CREATE UNIQUE INDEX uq_tx_recurring
   ON transactions(recurring_rule_id, occurred_on) WHERE recurring_rule_id IS NOT NULL;
+
+-- Transfers: two legs sharing transfer_group_id, which is the id of the
+-- outgoing leg. The outgoing leg is inserted first with an explicit id
+-- (the repository allocates it inside the same transaction); the incoming leg
+-- must mirror it exactly. A transfer is deleted with one statement that
+-- removes both legs, because the foreign key is checked at statement end.
+CREATE UNIQUE INDEX uq_transfer_in_group
+  ON transactions(transfer_group_id) WHERE kind = 'transfer_in';
+
+CREATE TRIGGER trg_transfer_out_group AFTER INSERT ON transactions
+WHEN NEW.kind = 'transfer_out' AND NEW.transfer_group_id IS NOT NEW.id
+BEGIN
+  SELECT RAISE(ABORT, 'transfer_out group id must equal its own id');
+END;
+
+CREATE TRIGGER trg_transfer_in_pair AFTER INSERT ON transactions
+WHEN NEW.kind = 'transfer_in' AND NOT EXISTS (
+  SELECT 1 FROM transactions o
+  WHERE o.id = NEW.transfer_group_id
+    AND o.kind = 'transfer_out'
+    AND o.amount_minor = -NEW.amount_minor
+    AND o.account_id <> NEW.account_id)
+BEGIN
+  SELECT RAISE(ABORT, 'transfer_in must mirror an outgoing leg');
+END;
+
+CREATE TRIGGER trg_transfer_legs_immutable
+BEFORE UPDATE OF amount_minor, account_id, kind, transfer_group_id ON transactions
+WHEN OLD.kind IN ('transfer_out','transfer_in')
+BEGIN
+  SELECT RAISE(ABORT, 'transfer legs cannot change; delete and recreate');
+END;
 ```
 
 ### Penyimpangan dari usulan awal (dokumen v1 §4.3), beserta alasannya
@@ -181,7 +227,7 @@ CREATE UNIQUE INDEX uq_tx_recurring
 
 ### Aturan penting
 
-- **Transfer** = dua baris (`transfer_out`, `transfer_in`) dalam satu transaksi DB, `transfer_group_id` = `id` baris keluar. Dikecualikan dari laporan pengeluaran/pemasukan, termasuk dalam saldo akun. Menghapus/mengubah satu sisi memengaruhi pasangannya (dilakukan atomik di `storage`).
+- **Transfer** = dua baris (`transfer_out`, `transfer_in`) dalam satu transaksi DB, `transfer_group_id` = `id` baris keluar. Baris keluar disisipkan lebih dulu dengan `id` eksplisit (dialokasikan repository di transaksi yang sama); trigger memastikan baris masuk mencerminkan baris keluar (jumlah berlawanan, akun berbeda, satu per grup) dan melarang pengubahan jumlah/akun/jenis; transfer dihapus dengan satu `DELETE ... WHERE transfer_group_id = ?`. Dikecualikan dari laporan pengeluaran/pemasukan, termasuk dalam saldo akun. Menghapus/mengubah satu sisi memengaruhi pasangannya (dilakukan atomik di `storage`).
 - **Saldo akun** = `opening_balance_minor + SUM(amount_minor)`; tidak ada kolom saldo tersimpan di v1 (menghindari drift). Dievaluasi ulang di Fase 8 berdasarkan angka.
 - **Paging** memakai keyset `(occurred_on DESC, id DESC)`, bukan `OFFSET`.
 - **Hapus** akun/kategori yang punya transaksi tidak diperbolehkan (`RESTRICT`); gunakan `archived`.
@@ -226,7 +272,7 @@ Konvensi IPC: uang = string minor unit; tanggal = `"YYYY-MM-DD"`; id = angka; se
 ### 7.1 Kunci database
 
 1. Saat pertama dijalankan: 32 byte acak (CSPRNG OS) = **kunci DB**.
-2. Plugin `keystore` (Kotlin) membuat kunci **AES-256-GCM di Android Keystore** (tidak dapat diekspor; mencoba StrongBox, fallback ke TEE; `setUnlockedDeviceRequired(true)`), lalu membungkus kunci DB. Hasil bungkus disimpan di direktori privat aplikasi.
+2. Plugin `keystore` (Kotlin) membuat kunci **AES-256-GCM di Android Keystore** (tidak dapat diekspor; mencoba StrongBox, fallback ke TEE; `setUnlockedDeviceRequired` ditunda, lihat bagian 15), lalu membungkus kunci DB. Hasil bungkus disimpan di direktori privat aplikasi.
 3. Saat membuka: unwrap → `PRAGMA key = "x'<64 hex>'"` (kunci mentah, melewati PBKDF2 SQLCipher sehingga startup cepat) → `zeroize` salinan di memori setelah dipakai.
 4. Tanpa kunci Keystore, berkas DB tidak dapat dibuka (diuji di spike Fase 3).
 
@@ -402,3 +448,31 @@ Lingkungan: macOS arm64, Rust 1.98, NDK 27.2.12479018, JDK 21, `minSdk` 24 (gene
 5. Bila `money.db` ada tetapi `db.key` hilang, aplikasi **menolak** membuat kunci baru (mencegah data tak terbaca diam-diam menimpa).
 6. `cargo check --target <android>` polos kini membutuhkan toolchain NDK di `PATH` (OpenSSL dikompilasi dari sumber); build lewat `pnpm tauri android build` menyetelnya sendiri. Cek cepat Android di CI dilakukan lewat job `android`, bukan `cargo check` terpisah.
 7. Perintah uji mandiri `storage_selftest` hanya ada di build debug (`cfg(debug_assertions)`), tanpa kunci atau data keuangan di keluaran; dihapus bersama pemasangan alur buka-kunci di Fase 7.
+
+### Perbaikan setelah review adversarial (kelompok 1 dan 2)
+
+| ID | Temuan | Perbaikan |
+|---|---|---|
+| H1 | Build tanpa SQLCipher membuat DB plaintext tanpa error | `Db::init` memeriksa `PRAGMA cipher_version` sebelum kunci dipasang; `StorageError::EncryptionUnavailable` |
+| H2 | `allowBackup` default `true` | `allowBackup=false`, `fullBackupContent=false`, `data_extraction_rules.xml` (cloud-backup dan device-transfer: semua domain dikecualikan) |
+| M1 | Jumlah uang tidak dibatasi di DB | `CHECK` ±(2^53−1) pada `amount_minor`, `opening_balance_minor`, `limit_minor` |
+| M2 | Tanggal tidak divalidasi | `CHECK (date(x) IS x)`; perhatikan `IS`, karena `date()` yang tidak valid menghasilkan NULL dan `CHECK` meloloskan NULL |
+| M3 | Pasangan transfer tidak dijamin | FK `transfer_group_id`, indeks unik baris masuk, 3 trigger (lihat bagian 5) |
+| M4 | Overflow wrap diam-diam di rilis | `overflow-checks = true` di `[profile.release]` |
+| M6 | Race pembuatan kunci | `KEY_LOCK` di `vault.rs`; tes konkurensi (gagal 15/15 tanpa lock, 0/15 dengan lock) |
+| L11 | Kategori menjadi induk dirinya sendiri | `CHECK (parent_id <> id)` |
+
+Migrasi 0001 diubah di tempat karena belum ada data di luar perangkat pengembangan. Setelah rilis pertama, perubahan skema hanya lewat migrasi baru.
+
+### Temuan review yang belum ditangani
+
+| ID | Temuan | Rencana |
+|---|---|---|
+| M5 | Kunci ada tetapi `money.db` hilang/kosong: DB baru dibuat diam-diam | Fase 7 (alur buka-kunci) |
+| L1 | `Debug` pada `Money` dapat mencetak jumlah | Fase 5, saat DTO/log dirancang |
+| L2 | `Currency::new` menerima eksponen yang salah untuk kode dikenal | Fase 5 |
+| L3 | `unwrap` Keystore dapat membuat kunci baru bila alias hilang | Fase 7 |
+| L4 | Salinan kunci dalam hex/stack tidak di-zeroize | Batas yang diketahui, dicatat |
+| L5 | FileProvider membuka `external-path` dan `cache-path` | Fase 7 |
+| L6 | CI: aksi tidak di-pin ke SHA, tanpa `timeout-minutes`, komentar job `android` | Setelah CI pertama berjalan |
+| L7–L9 | `mt-core` belum dipakai `mt-storage`; `allow(dead_code)` tingkat modul; migrasi membaca versi sebelum `BEGIN` | Fase 5 / 7 |

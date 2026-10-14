@@ -34,6 +34,9 @@ impl Db {
     }
 
     fn init(conn: Connection, key: &DbKey) -> Result<Self, StorageError> {
+        // Plain SQLite silently ignores `PRAGMA key` and would write a
+        // plaintext file, so prove SQLCipher is linked before touching the key.
+        require_cipher(cipher_version(&conn)?)?;
         apply_key(&conn, key)?;
         // Fails with NotADatabase when the key is wrong, before any other work.
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
@@ -77,6 +80,22 @@ impl Db {
     #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+}
+
+/// `PRAGMA cipher_version` returns a row only on SQLCipher builds.
+fn cipher_version(conn: &Connection) -> Result<Option<String>, StorageError> {
+    match conn.query_row("PRAGMA cipher_version", [], |r| r.get::<_, String>(0)) {
+        Ok(version) => Ok(Some(version)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn require_cipher(version: Option<String>) -> Result<(), StorageError> {
+    match version {
+        Some(v) if !v.trim().is_empty() => Ok(()),
+        _ => Err(StorageError::EncryptionUnavailable),
     }
 }
 
@@ -141,8 +160,16 @@ mod tests {
     fn seeded() -> Db {
         let db = Db::open_in_memory(&key(1)).unwrap();
         db.conn().execute_batch(SEED).unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO accounts(name,kind,currency,created_at) VALUES('Bank','bank','IDR',0);",
+            )
+            .unwrap();
         db
     }
+
+    const OUT_LEG: &str = "INSERT INTO transactions(id,account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
+                           VALUES(10,1,-500,'transfer_out','2026-10-14',10,0)";
 
     #[test]
     fn creates_schema_at_current_version() {
@@ -247,8 +274,8 @@ mod tests {
         let with_category = "INSERT INTO transactions(account_id,category_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
                              VALUES(1,1,-100,'transfer_out','2026-10-14',1,0)";
         assert_eq!(sql(&db, with_category), Err(StorageError::Constraint));
-        let ok = "INSERT INTO transactions(account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
-                  VALUES(1,-100,'transfer_out','2026-10-14',1,0)";
+        let ok = "INSERT INTO transactions(id,account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
+                  VALUES(1,1,-100,'transfer_out','2026-10-14',1,0)";
         assert_eq!(sql(&db, ok), Ok(1));
     }
 
@@ -292,5 +319,206 @@ mod tests {
         assert_eq!(sql(&db, insert), Err(StorageError::Constraint));
         let bad_month = "INSERT INTO budgets(category_id,month,limit_minor) VALUES(1,'Oct-26',1)";
         assert_eq!(sql(&db, bad_month), Err(StorageError::Constraint));
+    }
+
+    // --- hardening (review findings H1, M1, M2, M3, L11) -------------------
+
+    #[test]
+    fn cipher_is_required() {
+        assert_eq!(
+            require_cipher(None),
+            Err(StorageError::EncryptionUnavailable)
+        );
+        assert_eq!(
+            require_cipher(Some("  ".into())),
+            Err(StorageError::EncryptionUnavailable)
+        );
+        assert_eq!(require_cipher(Some("4.6.1 community".into())), Ok(()));
+    }
+
+    #[test]
+    fn this_build_links_sqlcipher() {
+        let conn = Connection::open_in_memory().unwrap();
+        let version = cipher_version(&conn).unwrap();
+        assert!(version.is_some_and(|v| !v.is_empty()));
+    }
+
+    #[test]
+    fn money_columns_are_bounded_like_mt_core() {
+        let db = seeded();
+        let max = mt_core::MAX_MINOR;
+        let income = |amount: i64| {
+            format!(
+                "INSERT INTO transactions(account_id,category_id,amount_minor,kind,occurred_on,created_at)
+                 VALUES(1,1,{amount},'income','2026-10-14',0)"
+            )
+        };
+        assert_eq!(sql(&db, &income(max)), Ok(1));
+        assert_eq!(sql(&db, &income(max + 1)), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, &income(i64::MAX)), Err(StorageError::Constraint));
+
+        let expense = format!(
+            "INSERT INTO transactions(account_id,category_id,amount_minor,kind,occurred_on,created_at)
+             VALUES(1,1,{},'expense','2026-10-14',0)",
+            -max - 1
+        );
+        assert_eq!(sql(&db, &expense), Err(StorageError::Constraint));
+
+        let opening = format!(
+            "INSERT INTO accounts(name,kind,currency,opening_balance_minor,created_at)
+             VALUES('Big','bank','IDR',{},0)",
+            max + 1
+        );
+        assert_eq!(sql(&db, &opening), Err(StorageError::Constraint));
+
+        let limit = format!(
+            "INSERT INTO budgets(category_id,month,limit_minor) VALUES(1,'2026-11',{})",
+            max + 1
+        );
+        assert_eq!(sql(&db, &limit), Err(StorageError::Constraint));
+    }
+
+    #[test]
+    fn dates_must_be_canonical_and_real() {
+        let db = seeded();
+        let insert = |date: &str| {
+            format!(
+                "INSERT INTO transactions(account_id,category_id,amount_minor,kind,occurred_on,created_at)
+                 VALUES(1,1,-1,'expense','{date}',0)"
+            )
+        };
+        assert_eq!(sql(&db, &insert("2026-02-28")), Ok(1));
+        assert_eq!(sql(&db, &insert("2024-02-29")), Ok(1)); // leap day
+        for bad in [
+            "2026-02-30",
+            "2026-13-01",
+            "2026-00-10",
+            "kemarin",
+            "2026-1-1",
+            "2026-10-14 10:00",
+            "",
+        ] {
+            assert_eq!(
+                sql(&db, &insert(bad)),
+                Err(StorageError::Constraint),
+                "{bad:?}"
+            );
+        }
+
+        let rule = |start: &str, end: &str, next: &str| {
+            format!(
+                "INSERT INTO recurring_rules(account_id,category_id,kind,amount_minor,freq,anchor_day,start_on,end_on,next_due)
+                 VALUES(1,1,'expense',-5,'monthly',1,'{start}',{end},'{next}')"
+            )
+        };
+        assert_eq!(sql(&db, &rule("2026-01-01", "NULL", "2026-01-01")), Ok(1));
+        assert_eq!(
+            sql(&db, &rule("2026-01-01", "'2026-12-31'", "2026-02-01")),
+            Ok(1)
+        );
+        assert_eq!(
+            sql(&db, &rule("2026-01-32", "NULL", "2026-01-01")),
+            Err(StorageError::Constraint)
+        );
+        assert_eq!(
+            sql(&db, &rule("2026-01-01", "'soon'", "2026-01-01")),
+            Err(StorageError::Constraint)
+        );
+        assert_eq!(
+            sql(&db, &rule("2026-01-01", "NULL", "2026-02-30")),
+            Err(StorageError::Constraint)
+        );
+
+        let month = |m: &str| {
+            format!("INSERT INTO budgets(category_id,month,limit_minor) VALUES(1,'{m}',1)")
+        };
+        assert_eq!(sql(&db, &month("2026-12")), Ok(1));
+        assert_eq!(sql(&db, &month("2026-13")), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, &month("2026-00")), Err(StorageError::Constraint));
+    }
+
+    #[test]
+    fn a_complete_transfer_is_accepted() {
+        let db = seeded();
+        assert_eq!(sql(&db, OUT_LEG), Ok(1));
+        let in_leg = "INSERT INTO transactions(account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
+                      VALUES(2,500,'transfer_in','2026-10-14',10,0)";
+        assert_eq!(sql(&db, in_leg), Ok(1));
+        // Removing both legs in one statement is allowed.
+        assert_eq!(
+            sql(&db, "DELETE FROM transactions WHERE transfer_group_id = 10"),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn an_incoming_leg_must_mirror_an_outgoing_leg() {
+        let db = seeded();
+        let in_leg = |account: i64, amount: i64, group: i64| {
+            format!(
+                "INSERT INTO transactions(account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
+                 VALUES({account},{amount},'transfer_in','2026-10-14',{group},0)"
+            )
+        };
+        // Nothing to mirror yet.
+        assert_eq!(sql(&db, &in_leg(2, 500, 10)), Err(StorageError::Constraint));
+        sql(&db, OUT_LEG).unwrap();
+        // Wrong amount, same account, unknown group.
+        assert_eq!(sql(&db, &in_leg(2, 499, 10)), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, &in_leg(1, 500, 10)), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, &in_leg(2, 500, 99)), Err(StorageError::Constraint));
+        // The valid leg works once, and a second one is a duplicate.
+        assert_eq!(sql(&db, &in_leg(2, 500, 10)), Ok(1));
+        assert_eq!(sql(&db, &in_leg(2, 500, 10)), Err(StorageError::Constraint));
+    }
+
+    #[test]
+    fn an_outgoing_leg_must_name_itself_as_the_group() {
+        let db = seeded();
+        let wrong = "INSERT INTO transactions(id,account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
+                     VALUES(10,1,-500,'transfer_out','2026-10-14',11,0)";
+        assert_eq!(sql(&db, wrong), Err(StorageError::Constraint));
+    }
+
+    #[test]
+    fn transfer_legs_cannot_be_orphaned_or_rewritten() {
+        let db = seeded();
+        sql(&db, OUT_LEG).unwrap();
+        sql(&db, "INSERT INTO transactions(account_id,amount_minor,kind,occurred_on,transfer_group_id,created_at)
+                  VALUES(2,500,'transfer_in','2026-10-14',10,0)").unwrap();
+        // Deleting only the outgoing leg would orphan the incoming one.
+        assert_eq!(
+            sql(&db, "DELETE FROM transactions WHERE id = 10"),
+            Err(StorageError::Constraint)
+        );
+        // Changing a leg's amount or account would unbalance the pair.
+        assert_eq!(
+            sql(
+                &db,
+                "UPDATE transactions SET amount_minor = -400 WHERE id = 10"
+            ),
+            Err(StorageError::Constraint)
+        );
+        assert_eq!(
+            sql(&db, "UPDATE transactions SET account_id = 2 WHERE id = 10"),
+            Err(StorageError::Constraint)
+        );
+        // Notes and dates stay editable.
+        assert_eq!(
+            sql(
+                &db,
+                "UPDATE transactions SET note = 'rent' WHERE transfer_group_id = 10"
+            ),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn a_category_cannot_be_its_own_parent() {
+        let db = seeded();
+        assert_eq!(
+            sql(&db, "UPDATE categories SET parent_id = 1 WHERE id = 1"),
+            Err(StorageError::Constraint)
+        );
     }
 }
