@@ -118,6 +118,9 @@ CREATE TABLE accounts (
   created_at INTEGER NOT NULL
 ) STRICT;
 
+-- Two active accounts cannot share a name (case-insensitive); archiving frees it.
+CREATE UNIQUE INDEX uq_accounts_active_name ON accounts(lower(name)) WHERE archived = 0;
+
 CREATE TABLE categories (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
@@ -523,3 +526,54 @@ Angka rilis hanya mencakup layar "Hello" + SQLCipher/OpenSSL; menjadi dasar Fase
 
 - `src-tauri/gen/android` adalah keluaran generator. Perubahan manifest di sana (`allowBackup`, tanpa INTERNET, `src/debug`) hilang bila `tauri android init` dijalankan ulang; penjaga CI akan menangkapnya.
 - Penjaga manifest berjalan di job `android` lewat `./gradlew :app:processUniversalReleaseMainManifest`, bukan membangun APK rilis penuh di CI (hemat menit). APK rilis penuh diverifikasi manual di atas.
+
+---
+
+## 17. Fitur 1: akun (Fase 5)
+
+### Lapisan
+
+| Lapisan | Isi |
+|---|---|
+| `mt-core` (`account.rs`) | `AccountKind`, `normalize_account_name` (trim, 1..=80 karakter, tanpa karakter kontrol; panjang dihitung dalam karakter seperti `length()` SQLite), `AccountDraft` (hanya bisa dibuat tervalidasi; mata uang dibawa oleh `Money`) |
+| `mt-storage` (`accounts.rs`) | `create_account`, `update_account`, `set_account_archived`, `account`, `accounts(include_archived)`, `app_currency`. Saldo = `opening_balance_minor + SUM(transactions.amount_minor)` dihitung SQLite pada setiap baca; tidak ada saldo tersimpan |
+| `src-tauri` (`accounts.rs`, `state.rs`, `error.rs`) | Command `accounts_list`, `account_create`, `account_update`, `account_archive`; `AppState { db: Mutex<Option<Db>> }`; `AppError { code, message }` |
+| UI (`src/lib/api.ts`, `money.ts`, `routes/+page.svelte`) | Satu modul pemanggil command; BigInt untuk uang; layar daftar, tambah, ubah, arsip |
+
+### Aturan
+
+- Nama rekening aktif unik tanpa memedulikan huruf besar/kecil (`uq_accounts_active_name`, indeks parsial `WHERE archived = 0`). Mengarsipkan membebaskan nama; memulihkan yang bentrok ditolak (`name_in_use`).
+- Mata uang tetap (K1): satu mata uang per instalasi (`settings.currency`, default IDR sampai ada pilihan di UI). Akun tidak dapat berpindah mata uang.
+- Saldo awal boleh negatif (kartu kredit, utang).
+- Rekening tidak dihapus, hanya diarsipkan; saldonya tetap dihitung dan masuk kekayaan bersih.
+- Saldo di luar ±(2^53−1) dilaporkan sebagai `amount_out_of_range`, tidak dipotong atau di-wrap.
+
+### Kontrak IPC
+
+Uang: string satuan minor (`"1250000"`, `"-250000"`), 1–16 digit, tanpa tanda `+`/spasi/desimal; rentang diperiksa `Money`. DTO menyertakan `currency` dan `exponent` agar UI memformat.
+
+| Kode galat | Arti |
+|---|---|
+| `unavailable` | Penyimpanan gagal dibuka (atau terkunci, setelah Fase 7) |
+| `invalid_input` | Nama kosong/panjang/berkarakter kontrol, jenis tidak dikenal, jumlah tidak terbaca |
+| `name_in_use` | Nama sudah dipakai rekening aktif lain |
+| `not_found`, `currency_mismatch`, `amount_out_of_range`, `internal` | sesuai namanya |
+
+Muatan galat tidak pernah memuat nama, jumlah, atau catatan (ada tesnya).
+
+### Pengujian
+
+| Tingkat | Jumlah | Mencakup |
+|---|---|---|
+| core | 4 | nama, panjang dalam karakter, kode jenis, draft |
+| storage | 12 | saldo = pembukaan + transaksi, per akun, negatif, urutan, arsip, ubah, unik huruf-besar-kecil, tak ditemukan, mata uang tetap, batas rentang |
+| app | 9 | string uang ketat, DTO camelCase, kode galat, duplikat, ubah/arsip, tanpa data pengguna di galat, penyimpanan tak tersedia |
+| UI (`pnpm test`) | 7 | format/parsing BigInt, desimal, rentang, tanpa nol negatif |
+| E2E emulator | 10 skenario | membuat, form direset, duplikat berbeda huruf, jumlah tak terbaca, ubah (isi awal terisi), negatif, total aktif, arsip menyembunyikan, pulihkan, persisten setelah restart proses |
+
+### Batasan yang diketahui
+
+- Sampai ada kunci aplikasi (Fase 7), basis data dibuka saat startup. Bila gagal, UI menampilkan "Penyimpanan tidak tersedia".
+- Build **desktop** tidak punya Keystore, jadi `pnpm tauri dev` di macOS menampilkan pesan itu. Iterasi UI cepat memakai emulator, atau dapat ditambahkan kunci khusus-debug di desktop bila diperlukan (belum dilakukan).
+- Tampilan baru fungsional; sistem desain ada di Fase 6.
+- Ikon, urutan manual (`sort_order` ada tetapi belum dapat diubah), dan pilihan mata uang menunggu fase berikutnya.

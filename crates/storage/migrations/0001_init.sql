@@ -20,6 +20,9 @@ CREATE TABLE accounts (
   created_at INTEGER NOT NULL
 ) STRICT;
 
+-- Two active accounts cannot share a name (case-insensitive); archiving frees it.
+CREATE UNIQUE INDEX uq_accounts_active_name ON accounts(lower(name)) WHERE archived = 0;
+
 CREATE TABLE categories (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),

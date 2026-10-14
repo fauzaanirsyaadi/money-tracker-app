@@ -42,6 +42,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: pnpm check
+      - run: pnpm test
       - name: Offline guard (CSP, capabilities, network APIs)
         run: |
           python3 -m unittest discover -s scripts -p 'test_*.py'

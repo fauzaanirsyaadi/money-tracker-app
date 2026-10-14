@@ -2,11 +2,15 @@
 //!
 //! This crate performs no I/O and depends on neither storage nor UI.
 
+mod account;
 mod currency;
 mod error;
 mod money;
 mod recurrence;
 
+pub use account::{
+    AccountDraft, AccountError, AccountKind, MAX_NAME_CHARS, normalize_account_name,
+};
 pub use currency::Currency;
 pub use error::MoneyError;
 pub use money::{MAX_MINOR, Money};

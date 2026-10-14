@@ -1817,8 +1817,10 @@ name = "money-tracker-app"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "mt-core",
  "mt-storage",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-mt-keystore",

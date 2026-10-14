@@ -10,8 +10,16 @@ pub enum StorageError {
     SchemaTooNew { found: u32, supported: u32 },
     /// The linked SQLite has no SQLCipher: refusing to create an unencrypted file.
     EncryptionUnavailable,
-    /// A constraint (CHECK, UNIQUE, FOREIGN KEY, NOT NULL) rejected a write.
+    /// A UNIQUE constraint rejected the write (for example a duplicate name).
+    Duplicate,
+    /// Any other constraint (CHECK, FOREIGN KEY, NOT NULL, trigger) rejected a write.
     Constraint,
+    /// The row does not exist.
+    NotFound,
+    /// A currency different from the app's (or the account's) was supplied.
+    CurrencyMismatch,
+    /// A stored value could not be read back (unknown code, out-of-range amount).
+    InvalidData,
     /// Any other SQLite failure, identified by its extended result code only.
     Sqlite { code: i32 },
 }
@@ -27,7 +35,11 @@ impl fmt::Display for StorageError {
                 )
             }
             Self::EncryptionUnavailable => f.write_str("sqlcipher is not available"),
+            Self::Duplicate => f.write_str("duplicate value"),
             Self::Constraint => f.write_str("constraint violated"),
+            Self::NotFound => f.write_str("not found"),
+            Self::CurrencyMismatch => f.write_str("currency mismatch"),
+            Self::InvalidData => f.write_str("invalid stored data"),
             Self::Sqlite { code } => write!(f, "sqlite error {code}"),
         }
     }
@@ -40,6 +52,12 @@ impl From<rusqlite::Error> for StorageError {
         match err {
             rusqlite::Error::SqliteFailure(e, _) => match e.code {
                 rusqlite::ErrorCode::NotADatabase => Self::WrongKeyOrCorrupt,
+                // SQLITE_CONSTRAINT_UNIQUE (2067) and _PRIMARYKEY (1555).
+                rusqlite::ErrorCode::ConstraintViolation
+                    if matches!(e.extended_code, 2067 | 1555) =>
+                {
+                    Self::Duplicate
+                }
                 rusqlite::ErrorCode::ConstraintViolation => Self::Constraint,
                 _ => Self::Sqlite {
                     code: e.extended_code,

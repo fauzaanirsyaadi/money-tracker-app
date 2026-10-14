@@ -77,7 +77,6 @@ impl Db {
             .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
-    #[cfg(test)]
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
@@ -311,7 +310,7 @@ mod tests {
         let insert = "INSERT INTO transactions(account_id,category_id,amount_minor,kind,occurred_on,recurring_rule_id,created_at)
                       VALUES(1,1,-500,'expense','2026-01-01',1,0)";
         assert_eq!(sql(&db, insert), Ok(1));
-        assert_eq!(sql(&db, insert), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, insert), Err(StorageError::Duplicate));
     }
 
     #[test]
@@ -320,7 +319,7 @@ mod tests {
         let insert =
             "INSERT INTO budgets(category_id,month,limit_minor) VALUES(1,'2026-10',1000000)";
         assert_eq!(sql(&db, insert), Ok(1));
-        assert_eq!(sql(&db, insert), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, insert), Err(StorageError::Duplicate));
         let bad_month = "INSERT INTO budgets(category_id,month,limit_minor) VALUES(1,'Oct-26',1)";
         assert_eq!(sql(&db, bad_month), Err(StorageError::Constraint));
     }
@@ -473,7 +472,7 @@ mod tests {
         assert_eq!(sql(&db, &in_leg(2, 500, 99)), Err(StorageError::Constraint));
         // The valid leg works once, and a second one is a duplicate.
         assert_eq!(sql(&db, &in_leg(2, 500, 10)), Ok(1));
-        assert_eq!(sql(&db, &in_leg(2, 500, 10)), Err(StorageError::Constraint));
+        assert_eq!(sql(&db, &in_leg(2, 500, 10)), Err(StorageError::Duplicate));
     }
 
     #[test]
