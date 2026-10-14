@@ -324,7 +324,7 @@ Versi stabil plugin (2.x) dipilih; seri 3.0.0-alpha **tidak** dipakai.
 | R6 | `FLAG_SECURE` dan `allowBackup=false` ada di `src-tauri/gen/android` yang bisa ditimpa regenerasi | Taruh di plugin/template; tambah cek CI atas manifest hasil merge | 4, 7 |
 | R7 | Versi WebView beragam; fitur CSS/JS modern mungkin tak ada di HP lama | Tetapkan `minSdk` (usulan 26) dan uji di perangkat kelas bawah | 6, 8 |
 | R8 | Gerbang kunci: memanggil biometrik dari sisi UI berarti JS dapat memanggil `unlock` tanpa prompt. Dapat diterima karena UI = kode sendiri tanpa konten jarak jauh, tetapi perlu dicek apakah plugin dapat dipicu dari Rust | Telaah plugin di Fase 7 | 7 |
-| R9 | JDK 21 terpasang, dokumen menyebut 17 | Jalankan `pnpm tauri android build` di Fase 2; pasang 17 bila gagal | 2 |
+| R9 | JDK 21 terpasang, dokumen menyebut 17 | **Terselesaikan (Fase 2):** build debug lokal berhasil dengan JDK 21 + Gradle 9.6.1 + NDK 27.2; CI memakai JDK 17 (belum terverifikasi) | 2 |
 | R10 | SvelteKit (dari template) menambah beban dibanding Vite+Svelte polos | Ukur bundle di Fase 6; ganti bila angkanya membenarkan | 6 |
 
 ---
