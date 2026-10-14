@@ -43,6 +43,43 @@ multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
 
+# Offline mode (docs/ARCHITECTURE.md, section 1): `tauri` itself pulls a small
+# HTTP client stack that our code never calls. Those crates are allowed only
+# through the exact parents listed here; anything else that reaches them, and
+# any other network crate, fails CI. Neutralisation at runtime is the job of the
+# missing INTERNET permission and the CSP (scripts/check_offline.py).
+deny = [
+  # --- tolerated, via named parents only -----------------------------------
+  { crate = "reqwest", wrappers = ["tauri"], reason = "pulled by tauri; never called by app code" },
+  { crate = "hyper", wrappers = ["reqwest", "hyper-util"], reason = "reqwest stack" },
+  { crate = "hyper-util", wrappers = ["reqwest"], reason = "reqwest stack" },
+  { crate = "http-body-util", wrappers = ["reqwest"], reason = "reqwest stack" },
+  { crate = "tower", wrappers = ["reqwest", "tower-http"], reason = "reqwest stack" },
+  { crate = "tower-http", wrappers = ["reqwest"], reason = "reqwest stack" },
+  { crate = "tokio-util", wrappers = ["reqwest"], reason = "reqwest stack" },
+  { crate = "socket2", wrappers = ["hyper-util", "tokio"], reason = "reqwest stack" },
+  { crate = "mio", wrappers = ["tokio"], reason = "tokio runtime" },
+  # --- not in the tree today: must stay out ---------------------------------
+  { crate = "ureq", reason = "HTTP client" },
+  { crate = "curl", reason = "HTTP client" },
+  { crate = "curl-sys", reason = "HTTP client" },
+  { crate = "isahc", reason = "HTTP client" },
+  { crate = "surf", reason = "HTTP client" },
+  { crate = "attohttpc", reason = "HTTP client" },
+  { crate = "h2", reason = "HTTP/2 transport" },
+  { crate = "hyper-tls", reason = "TLS for HTTP" },
+  { crate = "hyper-rustls", reason = "TLS for HTTP" },
+  { crate = "native-tls", reason = "TLS stack" },
+  { crate = "rustls", reason = "TLS stack" },
+  { crate = "tokio-rustls", reason = "TLS stack" },
+  { crate = "openssl", reason = "only openssl-sys (vendored, for SQLCipher) is allowed" },
+  { crate = "tungstenite", reason = "websocket" },
+  { crate = "tokio-tungstenite", reason = "websocket" },
+  { crate = "quinn", reason = "QUIC" },
+  { crate = "hickory-resolver", reason = "DNS" },
+  { crate = "trust-dns-resolver", reason = "DNS" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

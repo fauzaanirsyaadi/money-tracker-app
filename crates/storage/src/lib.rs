@@ -4,6 +4,8 @@
 
 mod db;
 mod error;
+mod recurring;
 
 pub use db::{Db, DbKey};
 pub use error::StorageError;
+pub use recurring::CatchUpReport;

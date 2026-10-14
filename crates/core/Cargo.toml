@@ -6,5 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+# Calendar arithmetic (month lengths, leap years). MIT OR Apache-2.0, actively
+# maintained; default features off, so no macros/formatting/parsing code.
+time = { version = "0.3", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

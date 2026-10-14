@@ -354,7 +354,7 @@ magic "MTBK" | format_version u16 | kdf_id u8 | argon2 m,t,p (u32 each) | salt[1
 
 Versi stabil plugin (2.x) dipilih; seri 3.0.0-alpha **tidak** dipakai.
 
-**Daftar izin crate jaringan (untuk CI Fase 4):** `reqwest`, `hyper`, `hyper-util`, `http`, `tokio`, `h2`-turunannya diizinkan **hanya** sebagai dependensi transitif `tauri`. Tindakan Fase 4: (1) periksa dengan `cargo tree -e features` apakah fitur yang membawa `reqwest` dapat dimatikan; (2) bila tidak, CI menegakkan "tidak ada crate jaringan *di luar* daftar ini" dan bahwa tidak ada kode di `crates/*` maupun `src-tauri/src` yang mengimpornya.
+**Crate jaringan (ditegakkan di CI sejak Fase 4):** `reqwest` masuk lewat `tauri` dan tidak pernah dipanggil kode aplikasi. Pembenarannya: tidak ada izin INTERNET di rilis, CSP memblokir origin jarak jauh, dan tidak ada kode kita yang memakainya. Penegakannya ada di `deny.toml` bagian `[bans]`: `reqwest`, `hyper`, `hyper-util`, `http-body-util`, `tower`, `tower-http`, `tokio-util`, `socket2`, dan `mio` hanya boleh hadir lewat induk yang disebut namanya (`wrappers`); klien HTTP, TLS, WebSocket, QUIC, dan DNS lain (`ureq`, `curl`, `isahc`, `surf`, `h2`, `rustls`, `native-tls`, `openssl`, `tungstenite`, `quinn`, `hickory-resolver`, dan seterusnya) dilarang sama sekali. Crate baru yang menarik salah satunya membuat `cargo deny check` gagal. Fitur `tauri` yang membawa `reqwest` belum dapat dimatikan (tidak ada fitur yang mengaturnya); dipantau tiap pembaruan `tauri`.
 
 ---
 
@@ -476,3 +476,50 @@ Migrasi 0001 diubah di tempat karena belum ada data di luar perangkat pengembang
 | L5 | FileProvider membuka `external-path` dan `cache-path` | Fase 7 |
 | L6 | CI: aksi tidak di-pin ke SHA, tanpa `timeout-minutes`, komentar job `android` | Setelah CI pertama berjalan |
 | L7–L9 | `mt-core` belum dipakai `mt-storage`; `allow(dead_code)` tingkat modul; migrasi membaca versi sebelum `BEGIN` | Fase 5 / 7 |
+
+---
+
+## 16. Hasil Fase 4: penjaga mode lokal (2026-10-14)
+
+### Aturan 5.1 dan penegakannya
+
+| Aturan | Penegak | Diuji |
+|---|---|---|
+| 1. Rilis tanpa izin INTERNET | `src/main` tidak mendeklarasikannya; hanya `src/debug` yang menambahnya. `scripts/check_offline.py manifest` memakai **daftar izin yang diizinkan** (bukan hanya melarang INTERNET), serta mewajibkan `allowBackup=false`, `usesCleartextTraffic != true`, tidak `debuggable`, dan `dataExtractionRules` | Uji negatif: INTERNET disisipkan ke manifest utama → CI gagal. APK rilis arm64 asli: izin hanya `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` |
+| 2. CSP memblokir origin jarak jauh | `app.security.csp` (lihat di bawah); `check_offline.py config` menolak `null`, wildcard, host jarak jauh, `unsafe-eval`, dan `unsafe-inline` selain untuk gaya | Di emulator: `fetch`, gambar, script, iframe jarak jauh dan `eval` diblokir (5 pelanggaran CSP tercatat); halaman dan IPC tetap berjalan |
+| 3. Tanpa analitik/crash reporter | `deny.toml` `[bans]` + `check_offline.py source` (API jaringan dan URL di kode kita) | 14 tes skrip; uji negatif `cargo deny` untuk `ureq` dan `reqwest` oleh induk tak dikenal |
+| 4. Berulang dihitung saat buka | `mt_core::Schedule::catch_up` + `Db::catch_up_recurring`, tanpa layanan latar | 13 tes core, 9 tes storage |
+| 5. Data keluar hanya lewat backup pilihan pengguna | `allowBackup=false` + aturan ekstraksi (Fase 3 perbaikan) | Dicek oleh penjaga manifest |
+
+CSP rilis:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline';
+img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost;
+base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'
+```
+
+`style-src-attr 'unsafe-inline'` hanya untuk atribut `style` (SvelteKit membungkus isi dengan `display: contents`). Skrip inline SvelteKit di-hash oleh Tauri saat build, jadi `script-src` tetap tanpa `unsafe-inline`. `devCsp` terpisah mengizinkan hanya `localhost:1420`.
+
+### Catch-up transaksi berulang
+
+- Kemunculan dihitung **dari indeks** (`start + k × every`), tidak dengan menambah ke tanggal sebelumnya, sehingga tanggal 31 tidak "melorot" ke 28 setelah Februari. Februari 29 di tahun kabisat dan jatuh ke 28 di tahun biasa.
+- `next_due` harus tepat berada di jadwal; bila tidak, aturan dilaporkan `rules_invalid` dan dilewati tanpa memblokir aturan lain.
+- Satu transaksi `IMMEDIATE`: semua transaksi baru dan `next_due` maju bersama, atau tidak sama sekali. Idempoten (indeks unik aturan+tanggal, `INSERT OR IGNORE`).
+- Batas per aturan per pembukaan (1.000 sesuai rencana); sisanya dilanjutkan pada pembukaan berikutnya. Aturan di akun/kategori yang diarsipkan tidak disentuh sampai dipulihkan.
+- Aturan melewati `end_on` dinonaktifkan (`active = 0`).
+- **Belum terpasang ke alur aplikasi:** fungsi ini baru dipanggil dari pengujian. Pemanggilan saat aplikasi dibuka (setelah buka-kunci) disambungkan di Fase 5/7 bersama command `recurring_catch_up`.
+
+### Ukuran dasar rilis (arm64, tanpa tanda tangan)
+
+| Berkas | Ukuran |
+|---|---|
+| `app-universal-release-unsigned.apk` (arm64 saja) | 5,9 MB |
+| `app-universal-debug.apk` (arm64) | 285 MB (simbol debug) |
+
+Angka rilis hanya mencakup layar "Hello" + SQLCipher/OpenSSL; menjadi dasar Fase 8.
+
+### Catatan
+
+- `src-tauri/gen/android` adalah keluaran generator. Perubahan manifest di sana (`allowBackup`, tanpa INTERNET, `src/debug`) hilang bila `tauri android init` dijalankan ulang; penjaga CI akan menangkapnya.
+- Penjaga manifest berjalan di job `android` lewat `./gradlew :app:processUniversalReleaseMainManifest`, bukan membangun APK rilis penuh di CI (hemat menit). APK rilis penuh diverifikasi manual di atas.

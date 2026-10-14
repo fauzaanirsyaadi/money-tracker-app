@@ -1828,6 +1828,9 @@ dependencies = [
 [[package]]
 name = "mt-core"
 version = "0.1.0"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "mt-storage"

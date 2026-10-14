@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      Money Tracker is offline-only: the main manifest declares no INTERNET
+      permission. Debug builds add it back in src/debug/AndroidManifest.xml so
+      the dev server works. CI fails if a release manifest contains it.
+    -->
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

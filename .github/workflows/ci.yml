@@ -42,6 +42,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: pnpm check
+      - name: Offline guard (CSP, capabilities, network APIs)
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 scripts/check_offline.py config
+          python3 scripts/check_offline.py source
 
   # Supply chain: advisories, licenses, bans, sources.
   supply-chain:
@@ -55,8 +60,9 @@ jobs:
       - run: cargo deny check
       - run: cargo audit
 
-  # Validation gate plus a debug APK. Requires src-tauri/gen/android to be
-  # committed (created once with `pnpm tauri android init`).
+  # Debug APK plus the release-manifest guard. (The Rust/UI validation gate runs
+  # in the `desktop` job.) Requires src-tauri/gen/android to be committed
+  # (created once with `pnpm tauri android init`).
   android:
     runs-on: ubuntu-24.04
     env:
@@ -84,6 +90,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       - run: pnpm tauri android build --apk --debug --target aarch64
+      - name: Release manifest must not request INTERNET
+        run: |
+          cd src-tauri/gen/android
+          ./gradlew :app:processUniversalReleaseMainManifest
+          cd -
+          manifest=$(find src-tauri/gen/android/app/build/intermediates/merged_manifest/universalRelease -name AndroidManifest.xml | head -1)
+          test -n "$manifest"
+          python3 scripts/check_offline.py manifest "$manifest"
       - uses: actions/upload-artifact@v4
         with:
           name: money-tracker-debug-apk
