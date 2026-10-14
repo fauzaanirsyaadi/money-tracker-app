@@ -4,7 +4,8 @@ Personal finance app. Android first, local-only mode. Stack: Tauri 2, Rust, Svel
 ## Rules
 - Money is always i64 minor units inside a Money type. Never f32/f64.
 - Fully offline: no network code, no analytics, no INTERNET permission in release builds.
-- #![forbid(unsafe_code)] in the app crate.
+- #![forbid(unsafe_code)] in the app crate (and `unsafe_code = "forbid"` workspace-wide).
+- Every Tauri command that calls into Kotlin (plugin `run_mobile_plugin*`) must be `async`: a sync command runs on the main thread and deadlocks with Kotlin's `runOnUiThread` (ANR).
 - Minimal, targeted changes only. Do not refactor outside the requested scope.
 - After each step run the validation gate and report the result.
 - No new dependency without stating why, its license and its maintenance status.

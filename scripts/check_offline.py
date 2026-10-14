@@ -2,6 +2,7 @@
 """Offline-mode guard for Money Tracker (docs/ARCHITECTURE.md, rule set 5.1).
 
     check_offline.py manifest <AndroidManifest.xml>   release manifest rules
+    check_offline.py apk <app.apk> [aapt2]            the same rules on the built APK
     check_offline.py config   [repo_root]             CSP and Tauri capabilities
     check_offline.py source   [repo_root]             no network APIs or URLs in our code
 
@@ -14,7 +15,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
+import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -82,6 +85,67 @@ def check_manifest(path: Path) -> list[str]:
         fail(problems, f"{path}: release build must not be debuggable")
     if not app.get(f"{ANDROID}dataExtractionRules"):
         fail(problems, f"{path}: android:dataExtractionRules is missing")
+    return problems
+
+
+def _aapt2(aapt2: str, *args: str) -> str:
+    result = subprocess.run([aapt2, *args], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"aapt2 {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+DEVTOOLS_MARKER = b"setWebContentsDebuggingEnabled"
+
+
+def _native_libs(apk: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(apk) as archive:
+        return {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("lib/") and name.endswith(".so")
+        }
+
+
+def check_apk(apk: Path, aapt2: str = "aapt2", run=_aapt2, libs=_native_libs) -> list[str]:
+    """Checks the *built* APK, the only manifest that is certainly the shipped one.
+
+    Intermediate Gradle manifests can omit library manifests or merge later, so
+    the permission list and application flags are read from the final artifact.
+    """
+    problems: list[str] = []
+    permissions = run(aapt2, "dump", "permissions", str(apk))
+    declared = re.findall(
+        r"^uses-(?:implied-)?permission(?:-sdk-23)?: name='([^']+)'", permissions, re.MULTILINE
+    )
+    if not declared and "package:" not in permissions:
+        fail(problems, f"{apk}: aapt2 produced no manifest information")
+        return problems
+    for name in declared:
+        if not any(name.endswith(allowed) for allowed in ALLOWED_PERMISSIONS):
+            hint = " (INTERNET is forbidden in release builds)" if name.endswith("INTERNET") else ""
+            fail(problems, f"{apk}: permission {name!r} is not allowed{hint}")
+
+    tree = run(aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", str(apk))
+
+    def flag(attribute: str) -> str | None:
+        match = re.search(rf":{attribute}\(0x[0-9a-fA-F]+\)=(\w+)", tree)
+        return match.group(1) if match else None
+
+    if flag("allowBackup") != "false":
+        fail(problems, f"{apk}: android:allowBackup must be \"false\"")
+    if flag("usesCleartextTraffic") == "true":
+        fail(problems, f"{apk}: android:usesCleartextTraffic must not be \"true\"")
+    if flag("debuggable") == "true":
+        fail(problems, f"{apk}: release build must not be debuggable")
+    if not re.search(r":dataExtractionRules\(", tree):
+        fail(problems, f"{apk}: android:dataExtractionRules is missing")
+
+    # wry only emits this JNI call when devtools are compiled in (debug build or
+    # the `devtools` feature). A release APK must not expose the inspector.
+    for name, blob in libs(apk).items():
+        if DEVTOOLS_MARKER in blob:
+            fail(problems, f"{apk}: {name} enables WebView debugging (devtools compiled in)")
     return problems
 
 
@@ -161,7 +225,7 @@ def check_source(repo: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[1] not in {"manifest", "config", "source"}:
+    if len(argv) < 2 or argv[1] not in {"manifest", "apk", "config", "source"}:
         print(__doc__)
         return 2
     command = argv[1]
@@ -170,6 +234,11 @@ def main(argv: list[str]) -> int:
             print("usage: check_offline.py manifest <AndroidManifest.xml>")
             return 2
         problems = check_manifest(Path(argv[2]))
+    elif command == "apk":
+        if len(argv) not in (3, 4):
+            print("usage: check_offline.py apk <app-release.apk> [path/to/aapt2]")
+            return 2
+        problems = check_apk(Path(argv[2]), argv[3] if len(argv) == 4 else "aapt2")
     else:
         repo = Path(argv[2]) if len(argv) > 2 else Path(__file__).resolve().parent.parent
         problems = check_config(repo) if command == "config" else check_source(repo)

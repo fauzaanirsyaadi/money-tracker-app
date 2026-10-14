@@ -105,6 +105,14 @@ jobs:
           manifest=$(find src-tauri/gen/android/app/build/intermediates/merged_manifests/universalRelease -name AndroidManifest.xml | head -1)
           test -n "$manifest"
           python3 scripts/check_offline.py manifest "$manifest"
+      - name: Built release APK must not request INTERNET
+        run: |
+          # The final artifact is the only manifest that is certainly the shipped one.
+          pnpm tauri android build --apk --target aarch64
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk/universal/release -name '*.apk' | head -1)
+          test -n "$apk"
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort | tail -1)
+          python3 scripts/check_offline.py apk "$apk" "$aapt2"
       - uses: actions/upload-artifact@v4
         with:
           name: money-tracker-debug-apk

@@ -285,7 +285,7 @@ Konvensi IPC: uang = string minor unit; tanggal = `"YYYY-MM-DD"`; id = angka; se
 
 - DB baru dibuka **setelah** unlock berhasil; saat aplikasi ke latar belakang, koneksi ditutup dan kunci dibuang dari memori.
 - Verifier PIN (Argon2id + salt) dan penghitung percobaan gagal disimpan di **berkas kecil di luar DB** (DB belum terbuka saat PIN diperiksa). Percobaan gagal diberi jeda eksponensial.
-- Biometrik lewat `tauri-plugin-biometric` (BiometricPrompt, dengan fallback PIN aplikasi).
+- Biometrik lewat plugin sendiri `mt-platform` (BiometricPrompt AndroidX, dengan fallback PIN aplikasi). *Direvisi di Fase 7A: bukan `tauri-plugin-biometric`, agar hasil prompt tidak melewati JS; lihat §23 dan SECURITY.md.*
 - Kunci Keystore **tidak** disyaratkan autentikasi per-pakai (`setUserAuthenticationRequired(false)`), sehingga mengganti/menambah sidik jari tidak membuat kunci tidak valid dan **tidak menyebabkan kehilangan data**.
 
 Konsekuensi yang jujur: penyerang yang sudah mengeksekusi kode di proses aplikasi (perangkat root) dapat melewati gerbang. Itu di luar model ancaman (bagian 8). Opsi penguatan di kemudian hari: mengikat kunci DB ke autentikasi pengguna (dengan risiko invalidasi, mitigasi lewat backup).
@@ -348,7 +348,7 @@ magic "MTBK" | format_version u16 | kdf_id u8 | argon2 m,t,p (u32 each) | salt[1
 | `argon2` 0.6 | KDF backup & verifier PIN | MIT/Apache-2.0 | Aktif (RustCrypto) | |
 | `chacha20poly1305` 0.11 | AEAD backup | MIT/Apache-2.0 | Aktif (RustCrypto) | |
 | `zeroize` | Membersihkan kunci dari memori | MIT/Apache-2.0 | Aktif | |
-| `tauri-plugin-biometric` 2.4 | Prompt biometrik | MIT/Apache-2.0 | Resmi Tauri | Hanya mobile |
+| ~~`tauri-plugin-biometric` 2.4~~ → `androidx.biometric` 1.1.0 | Prompt biometrik (lewat plugin `mt-platform`) | Apache-2.0 | Google, stabil | Hanya mobile. Diganti di Fase 7A (hasil tidak boleh lewat JS) |
 | `tauri-plugin-dialog` 2.8 | Dialog simpan/buka (SAF) | MIT/Apache-2.0 | Resmi Tauri | Ke R5 |
 | `tauri-plugin-fs` 2.7 | Baca/tulis URI `content://` | MIT/Apache-2.0 | Resmi Tauri | Hanya bila R5 mengharuskan |
 | `proptest` (dev) | Property test `Money` | MIT/Apache-2.0 | Aktif | Hanya dev |
@@ -840,3 +840,16 @@ Urutan Fase 7 yang disepakati: **A** kunci aplikasi + `FLAG_SECURE`, **B** backu
 - Lupa PIN: tak ada pemulihan dalam aplikasi sampai langkah B. Pengaturan memperingatkan.
 - M5, L1–L9 (langkah C). L7 sudah selesai sebelumnya.
 - Tidak ada dukungan "layar kunci" sistem sebagai cadangan PIN (`DEVICE_CREDENTIAL`) — sengaja, agar tidak ada jalur kedua yang tak terhitung.
+
+### Pemeriksaan sebelum langkah B (2026-10-14)
+
+| Butir | Hasil |
+|---|---|
+| Penjaga izin pada artefak jadi | `check_offline.py apk <apk> [aapt2]` membaca `aapt2 dump permissions` dan `dump xmltree` dari **APK rilis jadi**, menolak `INTERNET`, `allowBackup`≠false, cleartext, debuggable, tanpa `dataExtractionRules`, dan pustaka native yang memuat `setWebContentsDebuggingEnabled`. CI membangun APK rilis dan menjalankannya; tes: APK debug gagal (INTERNET, cleartext, debuggable, devtools), APK rilis lolos |
+| `forbid(unsafe_code)` | Masih berlaku di crate aplikasi dan seluruh workspace; tidak ada `unsafe` di kode kita. Titik sentuh Kotlin/JNI didaftar di SECURITY.md |
+| `mt_insecure` pada rilis | `scripts/android_release_check.mjs`: APK rilis ditandatangani-uji dengan kunci debug, dijalankan dengan `--ez mt_insecure true`; `FLAG_SECURE` tetap aktif, tidak `KEEP_SCREEN_ON`, tidak debuggable |
+| `KEEP_SCREEN_ON` | **Hanya build debug**; tidak ada pada jendela rilis. Syarat rilis kini dijaga skrip di atas |
+| Soket DevTools pada rilis | Terlihat di emulator, tetapi image `userdebug` (`ro.debuggable=1`) yang membukanya; pustaka rilis tidak memuat panggilan pengaktifnya. Perlu dicek ulang di perangkat build `user` |
+| Jeda PIN setelah reboot | Hitungan bertahan; jeda dimulai penuh lagi tiap proses baru (SECURITY.md) |
+| Aturan async | Ditambahkan ke CLAUDE.md |
+| Parameter Argon2id | Dicatat di SECURITY.md (19 MiB, t=2, p=1); pengukuran perangkat kelas bawah menunggu Fase 8 |

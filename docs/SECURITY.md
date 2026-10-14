@@ -34,6 +34,37 @@ Konsekuensi yang harus dipahami:
 - Karena bukan kriptografis, **PIN lupa tidak punya jalan pemulihan di dalam aplikasi**. Jalannya adalah **backup terenkripsi** (langkah B) dan memulihkannya pada instalasi bersih. Sebelum backup tersedia, aplikasi memperingatkan pengguna saat mengatur PIN.
 - Hasil biometrik adalah keputusan boolean dari sistem; aplikasi tidak memakai `CryptoObject`. Hasilnya dikirim dari kode native langsung ke Rust, sehingga skrip di WebView tidak dapat memalsukannya (hanya dapat *meminta* prompt).
 
+## Parameter kriptografi
+
+| Hal | Nilai |
+|---|---|
+| Hash PIN | Argon2id v1.3, memori **19 MiB (19 456 KiB)**, iterasi **t = 2**, paralelisme **p = 1**, keluaran 32 byte, salt acak 16 byte; disimpan sebagai string PHC di `lock.json`. Ini minimum OWASP. Waktu di perangkat kelas bawah belum diukur (Fase 8); bila terlalu lambat saat buka-kunci, turunkan memori atau t, dan ingat PIN 6 digit tetap lemah terhadap penyerang offline |
+| Perbandingan | Verifikasi konstan-waktu (crate `argon2`/`password-hash`) |
+| Kunci basis data | 32 byte acak (`getrandom`), dibungkus AES-256-GCM oleh kunci Keystore yang tidak dapat diekspor (`setUnlockedDeviceRequired(true)`), dipasang sebagai `PRAGMA key = "x'…'"` |
+| Backup (langkah B) | Argon2id dari frasa sandi + XChaCha20-Poly1305 — parameter akan dicatat di sini setelah ditetapkan |
+
+## Perilaku jeda PIN setelah reboot
+
+Hitungan salah disimpan di `lock.json` (bertahan setelah reboot). Jeda tidak disimpan sebagai waktu absolut: jam monotonik direset saat reboot dan jam dinding dapat diubah, jadi **setiap kali proses aplikasi dimulai, jeda untuk hitungan yang tersimpan dimulai penuh lagi**. Diverifikasi di emulator: 5 salah → reboot → hitungan tetap 5, sisa jeda ≈ 23 dtk sekitar 7 dtk setelah proses mulai (jeda penuh 30 dtk), dan PIN yang benar ditolak (`locked_out`). Konsekuensi: reboot tidak memotong jeda; sebaliknya, pengguna yang sah yang memulai ulang aplikasi menunggu jeda penuh lagi. Batasnya: penyerang yang punya akses root dapat menyunting `lock.json`; itu di luar model ancaman (lihat di atas).
+
+## Kode native yang menyentuh data sensitif
+
+`#![forbid(unsafe_code)]` berlaku di crate aplikasi (`src-tauri/src/lib.rs`) dan `unsafe_code = "forbid"` di seluruh workspace (semua crate: `mt-core`, `mt-storage`, aplikasi, dan kedua plugin mewarisi). Tidak ada kata `unsafe` dalam kode Rust kita. Kode JNI/FFI yang ada hanya milik Tauri/wry (di luar crate kita) dan pustaka SQLCipher/OpenSSL (C, lewat `rusqlite`).
+
+| Lokasi | Data yang lewat | Catatan |
+|---|---|---|
+| `mt-keystore` (`KeyVault.kt` ↔ `mobile.rs`) | **Kunci DB dalam teks biasa** pada `unwrap` (hasil) dan `wrap` (masukan), berupa string hex di JSON lewat jembatan plugin Tauri | Satu-satunya titik di mana kunci melewati Kotlin/JNI. String hex tidak dapat di-zeroize (L4). Tidak dicatat di log; kesalahan dibuat generik |
+| `mt-platform` (`PlatformPlugin.kt`) | Hasil biometrik (`success`/`cancelled`/`failed`), boolean tema bar sistem | Tidak ada data keuangan atau PIN |
+| `MainActivity.kt` | `FLAG_SECURE`, inset jendela | Tidak ada data |
+| `lock.json`, `money.db`, `db.key` | Dibaca/ditulis hanya oleh Rust (`std::fs`) | Tidak melewati Kotlin |
+| PIN | WebView → IPC Tauri → Rust (`Zeroizing`) | Tidak melewati Kotlin; salinan sisi WebView tidak dapat dijamin terhapus |
+
+Kode Kotlin tidak tercakup aturan Rust dan masuk `/security-review` (langkah akhir Fase 7). Rencana langkah B menjaga agar Kotlin hanya melihat **ciphertext** backup (menyalin berkas antara URI SAF dan berkas sementara privat), sehingga tetap tanpa `unsafe` di Rust.
+
+## Mengapa plugin biometrik sendiri
+
+Dokumen build semula memakai `tauri-plugin-biometric`. Plugin resmi itu mengekspos perintah ke JS dan hasilnya kembali lewat JS, sehingga skrip di WebView dapat melaporkan "berhasil" tanpa prompt. Di sini hasil prompt dibuat di kode native dan langsung dikirim ke Rust (`lock_unlock_biometric` hanya *meminta* prompt); plugin kita tidak mendaftarkan perintah JS. **Jangan menggantinya dengan plugin resmi tanpa meninjau ulang jalur ini.**
+
 ## Batas yang diketahui
 
 - **Keystore di emulator** berlevel `software`. Level `tee`/`strongbox` belum diverifikasi pada perangkat nyata.
@@ -41,7 +72,7 @@ Konsekuensi yang harus dipahami:
 - **Jam dinding** hanya dipakai untuk kunci otomatis dengan tenggang; memundurkannya justru mengunci. Memajukannya tidak mempercepat jeda tebakan PIN (jam monotonik).
 - **`lock.json` rusak:** aplikasi gagal tertutup dan menampilkan penjelasan; satu-satunya jalan adalah restore dari backup atau menghapus data aplikasi.
 - **Layar perangkat dan aksesibilitas:** `FLAG_SECURE` tidak mencegah pembaca layar atau kamera orang lain.
-- **Build debug** dapat dilihat lewat DevTools dan dapat menonaktifkan `FLAG_SECURE` dengan ekstra intent; build rilis mengabaikan keduanya.
+- **Build debug** dapat dilihat lewat DevTools dan dapat menonaktifkan `FLAG_SECURE` dengan ekstra intent. Build rilis mengabaikan ekstra itu, **dibuktikan pada APK rilis** (`scripts/android_release_check.mjs`) dan DevTools tidak terkompilasi (`check_offline.py apk` memeriksa pustaka native). Pada image emulator `userdebug` WebView sendiri membuka soket DevTools untuk semua aplikasi, jadi pemeriksaan runtime hanya bermakna di perangkat build `user`.
 
 ## Melaporkan kerentanan
 

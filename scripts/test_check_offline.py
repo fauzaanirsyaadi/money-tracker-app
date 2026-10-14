@@ -63,6 +63,66 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(self.run_manifest(manifest(dataExtractionRules=None)))
 
 
+PERMISSIONS_OK = """package: com.moneytracker.app
+uses-permission: name='android.permission.USE_BIOMETRIC'
+uses-permission: name='android.permission.USE_FINGERPRINT'
+permission: com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+uses-permission: name='com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
+"""
+
+TREE_OK = """N: android=http://schemas.android.com/apk/res/android (line=2)
+  E: manifest (line=2)
+      E: application (line=31)
+        A: http://schemas.android.com/apk/res/android:allowBackup(0x01010280)=false
+        A: http://schemas.android.com/apk/res/android:usesCleartextTraffic(0x010104ec)=false
+        A: http://schemas.android.com/apk/res/android:dataExtractionRules(0x0101063e)=@0x7f130000
+"""
+
+
+class ApkTests(unittest.TestCase):
+    libs = {"lib/arm64-v8a/libapp.so": b"\x00some native code\x00"}
+
+    def run_apk(self, permissions=PERMISSIONS_OK, tree=TREE_OK) -> list[str]:
+        def fake(aapt2, *args):
+            return permissions if "permissions" in args else tree
+
+        return guard.check_apk(Path("app.apk"), run=fake, libs=lambda _: self.libs)
+
+    def test_the_real_release_output_passes(self):
+        self.assertEqual(self.run_apk(), [])
+
+    def test_internet_in_the_built_apk_fails(self):
+        extra = PERMISSIONS_OK + "uses-permission: name='android.permission.INTERNET'\n"
+        problems = self.run_apk(permissions=extra)
+        self.assertTrue(any("INTERNET" in p for p in problems), problems)
+
+    def test_implied_and_sdk23_permissions_are_checked_too(self):
+        extra = PERMISSIONS_OK + "uses-implied-permission: name='android.permission.INTERNET' reason='x'\n"
+        self.assertTrue(self.run_apk(permissions=extra))
+        extra = PERMISSIONS_OK + "uses-permission-sdk-23: name='android.permission.CAMERA'\n"
+        self.assertTrue(self.run_apk(permissions=extra))
+
+    def test_debuggable_backup_and_cleartext_fail(self):
+        for bad in (
+            TREE_OK.replace("allowBackup(0x01010280)=false", "allowBackup(0x01010280)=true"),
+            TREE_OK + "A: http://schemas.android.com/apk/res/android:debuggable(0x0101000f)=true\n",
+            TREE_OK.replace("usesCleartextTraffic(0x010104ec)=false", "usesCleartextTraffic(0x010104ec)=true"),
+            TREE_OK.replace("dataExtractionRules", "somethingElse"),
+        ):
+            self.assertTrue(self.run_apk(tree=bad), bad)
+
+    def test_devtools_compiled_into_a_native_library_fails(self):
+        self.libs = {"lib/arm64-v8a/libapp.so": b"\x00setWebContentsDebuggingEnabled\x00"}
+        try:
+            problems = self.run_apk()
+        finally:
+            self.libs = {"lib/arm64-v8a/libapp.so": b"\x00ok\x00"}
+        self.assertTrue(any("WebView debugging" in p for p in problems), problems)
+
+    def test_empty_aapt_output_is_a_failure_not_a_pass(self):
+        self.assertTrue(self.run_apk(permissions="", tree=""))
+
+
 class CspTests(unittest.TestCase):
     GOOD = (
         "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
