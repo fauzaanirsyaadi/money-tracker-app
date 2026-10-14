@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  isDarkTheme,
   type KeyValueStore,
   loadLastUsed,
   loadTheme,
@@ -66,4 +67,11 @@ test("an unavailable store never throws", () => {
   saveTheme("light", broken);
   saveLastUsed({ accountId: 1 }, broken);
   assert.equal(loadTheme(null), "auto");
+});
+
+test("the shown theme is dark when forced or when auto follows a dark system", () => {
+  assert.equal(isDarkTheme("dark", false), true);
+  assert.equal(isDarkTheme("light", true), false);
+  assert.equal(isDarkTheme("auto", true), true);
+  assert.equal(isDarkTheme("auto", false), false);
 });

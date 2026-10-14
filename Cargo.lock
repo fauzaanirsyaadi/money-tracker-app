@@ -1824,6 +1824,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-mt-keystore",
+ "tauri-plugin-mt-platform",
  "zeroize",
 ]
 
@@ -3248,6 +3249,15 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-mt-keystore"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
+]
+
+[[package]]
+name = "tauri-plugin-mt-platform"
 version = "0.1.0"
 dependencies = [
  "serde",

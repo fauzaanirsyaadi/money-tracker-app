@@ -3,6 +3,7 @@
 mod accounts;
 mod budgets;
 mod error;
+mod platform;
 mod recurring;
 mod reports;
 mod state;
@@ -21,6 +22,7 @@ use crate::state::AppState;
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_mt_keystore::init())
+        .plugin(tauri_plugin_mt_platform::init())
         .setup(|app| {
             // Without the app lock (phase 7) the database opens at startup. A
             // failure leaves storage unavailable; commands then report that.
@@ -54,6 +56,7 @@ pub fn run() {
         reports::report_spending,
         reports::report_trend,
         reports::report_net_worth,
+        platform::system_bars_set,
         selftest::storage_selftest,
     ]);
     #[cfg(not(debug_assertions))]
@@ -81,6 +84,7 @@ pub fn run() {
         reports::report_spending,
         reports::report_trend,
         reports::report_net_worth,
+        platform::system_bars_set,
     ]);
 
     builder

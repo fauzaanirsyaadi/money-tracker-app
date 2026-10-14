@@ -45,6 +45,11 @@ export function nextTheme(current: ThemePref): ThemePref {
   return current === "auto" ? "light" : current === "light" ? "dark" : "auto";
 }
 
+/** Whether the theme actually shown is dark, given the preference and the OS setting. */
+export function isDarkTheme(pref: ThemePref, systemDark: boolean): boolean {
+  return pref === "auto" ? systemDark : pref === "dark";
+}
+
 export function loadTheme(store: KeyValueStore | null = defaultStore()): ThemePref {
   return parseTheme(read(store, THEME_KEY));
 }

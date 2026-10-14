@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-mt-platform"
+description = "Android window and system-bar behaviour. No JS-facing commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+links = "tauri-plugin-mt-platform"
+
+[dependencies]
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[lints]
+workspace = true

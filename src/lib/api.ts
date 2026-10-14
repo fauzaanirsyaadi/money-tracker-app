@@ -301,3 +301,8 @@ export const reports = {
   trend: (from: string, to: string) => call<Trend>("report_trend", { from, to }),
   netWorth: () => call<NetWorth>("report_net_worth"),
 };
+
+export const platform = {
+  /** Matches the status/navigation bar icons to the app theme. */
+  systemBars: (dark: boolean) => call<void>("system_bars_set", { dark }),
+};

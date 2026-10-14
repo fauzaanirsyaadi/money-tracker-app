@@ -469,16 +469,21 @@ Migrasi 0001 diubah di tempat karena belum ada data di luar perangkat pengembang
 
 ### Temuan review yang belum ditangani
 
-| ID | Temuan | Rencana |
-|---|---|---|
-| M5 | Kunci ada tetapi `money.db` hilang/kosong: DB baru dibuat diam-diam | Fase 7 (alur buka-kunci) |
-| L1 | `Debug` pada `Money` dapat mencetak jumlah | Fase 5, saat DTO/log dirancang |
-| L2 | `Currency::new` menerima eksponen yang salah untuk kode dikenal | Fase 5 |
-| L3 | `unwrap` Keystore dapat membuat kunci baru bila alias hilang | Fase 7 |
-| L4 | Salinan kunci dalam hex/stack tidak di-zeroize | Batas yang diketahui, dicatat |
-| L5 | FileProvider membuka `external-path` dan `cache-path` | Fase 7 |
-| L6 | CI: aksi tidak di-pin ke SHA, tanpa `timeout-minutes`, komentar job `android` | Setelah CI pertama berjalan |
-| L7–L9 | `mt-core` belum dipakai `mt-storage`; `allow(dead_code)` tingkat modul; migrasi membaca versi sebelum `BEGIN` | Fase 5 / 7 |
+Diperbarui 2026-10-14 sebelum Fase 7. Tidak ada yang diperbaiki di sini; ini daftar kerja. Nomor baris mengacu pada commit `debde43`.
+
+| ID | Tingkat | Temuan | Lokasi | Rencana |
+|---|---|---|---|---|
+| M5 | Sedang | Kunci ada tetapi `money.db` hilang/kosong: `Db::open` membuat DB baru yang kosong tanpa kabar (kebalikannya, DB ada tanpa kunci, sudah ditolak lewat `KeyMissing`). Pengguna melihat data hilang tanpa penjelasan. | `src-tauri/src/vault.rs:85-91` (cabang kunci ada), `crates/storage/src/db.rs:30` (`Db::open`) | Fase 7 langkah C: tolak dan laporkan "database hilang" bila `db.key` ada; tawarkan restore dari backup |
+| L1 | Rendah | `#[derive(Debug)]` pada `Money` mencetak jumlah, bisa bocor ke log lewat `{:?}` | `crates/core/src/money.rs:12` | Langkah C: `Debug` manual yang menyamarkan nilai; tes bahwa `format!("{:?}")` tidak memuat angka |
+| L2 | Rendah | `Currency::new` menerima eksponen yang salah untuk kode yang dikenal (mis. `IDR` dengan eksponen 2) | `crates/core/src/currency.rs:49` | Langkah C: validasi terhadap tabel kode dikenal |
+| L3 | Rendah | `getKey` mengembalikan null bila alias hilang lalu `key()` **membuat kunci baru**; `unwrap` lalu gagal dengan kesalahan GCM yang menyesatkan, dan kunci baru menimpa kemungkinan pemulihan | `src-tauri/plugins/mt-keystore/.../KeyVault.kt:20,46` | Langkah C: `unwrap` tidak pernah membuat kunci; hanya `wrap` yang boleh |
+| L4 | Rendah | Salinan kunci sebagai hex/stack tidak di-zeroize sepenuhnya | `crates/storage/src/db.rs:111` (literal sudah `Zeroizing`; salinan pada tumpukan SQLCipher/Kotlin tidak terjangkau) | Batas yang diketahui; dicatat di SECURITY.md |
+| L5 | Rendah | FileProvider mengekspos `external-path` dan `cache-path` seluruhnya | `src-tauri/gen/android/app/src/main/res/xml/file_paths.xml:3-4` | Langkah B: sempitkan ke direktori ekspor khusus atau hapus FileProvider bila SAF cukup |
+| L6 | Rendah | CI: aksi tidak di-pin ke SHA, tanpa `timeout-minutes`, komentar job `android` | `.github/workflows/ci.yml:23-106` | Setelah CI pertama berjalan |
+| L7 | Info | `mt-core` belum dipakai `mt-storage` | — | **Selesai** di Fase 5 (`mt-storage` memakai `mt_core` di `categories.rs`, `transactions.rs`) |
+| L8 | Rendah | `allow(dead_code)` tingkat modul | `src-tauri/src/vault.rs:2` | Langkah C: persempit ke item, atau hapus setelah kunci dibuka dari alur kunci aplikasi |
+| L9 | Rendah | Migrasi membaca `user_version` sebelum `BEGIN IMMEDIATE`; dua proses bisa sama-sama menjalankan migrasi yang sama | `crates/storage/src/db.rs:61` vs `:71` | Langkah C: baca versi di dalam transaksi |
+| L10 | — | **Tidak ada**: daftar review asli berhenti di L9 (L7–L9 digabung), tidak ada temuan L10 | — | Bila review lain memakai L10, mohon sebut isinya |
 
 ---
 
@@ -759,7 +764,7 @@ Ponsel: tab bawah, satu kolom. ≥ 720 px: rel samping, lembar menjadi dialog te
 | CSS (11 berkas) | 18,5 KB | 6,3 KB |
 | Total | 160,3 KB | 64,4 KB |
 
-`scripts/bundle_size.py --max-js-gzip-kb=120` berjalan di CI (job `desktop`).
+`scripts/bundle_size.py --max-js-gzip-kb=80` berjalan di CI (job `desktop`).
 
 ### Temuan selama verifikasi
 

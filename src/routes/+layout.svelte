@@ -4,11 +4,11 @@
   import "../app.css";
 
   import { page } from "$app/state";
-  import { ApiError, recurring } from "$lib/api";
+  import { ApiError, platform, recurring } from "$lib/api";
   import Icon from "$lib/components/Icon.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import { isoDate } from "$lib/dates";
-  import { loadTheme, nextTheme, saveTheme, type ThemePref } from "$lib/prefs";
+  import { isDarkTheme, loadTheme, nextTheme, saveTheme, type ThemePref } from "$lib/prefs";
   import { dataChanged, notify, openQuickAdd, ui } from "$lib/session.svelte";
 
   let { children } = $props();
@@ -33,6 +33,16 @@
     const root = document.documentElement;
     if (value === "auto") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", value);
+    syncSystemBars(value);
+  }
+
+  // The OS draws the status/navigation bar icons; tell it which theme is shown
+  // so they stay readable when the app theme differs from the system theme.
+  function syncSystemBars(value: ThemePref) {
+    const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    platform.systemBars(isDarkTheme(value, systemDark)).catch(() => {
+      // Cosmetic only: a failure leaves the bars as the system drew them.
+    });
   }
 
   function cycleTheme() {
@@ -46,6 +56,9 @@
   onMount(async () => {
     theme = loadTheme();
     applyTheme(theme);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onSystemChange = () => syncSystemBars(theme);
+    media.addEventListener("change", onSystemChange);
     try {
       const report = await recurring.catchUp(isoDate());
       if (report.transactionsCreated > 0) {
