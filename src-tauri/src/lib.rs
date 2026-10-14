@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod accounts;
+mod budgets;
 mod error;
+mod recurring;
 mod state;
 mod transactions;
 mod vault;
@@ -39,6 +41,15 @@ pub fn run() {
         transactions::transaction_update,
         transactions::transaction_delete,
         transactions::transfer_create,
+        budgets::budgets_list,
+        budgets::budget_set,
+        budgets::budget_delete,
+        recurring::recurring_list,
+        recurring::recurring_create,
+        recurring::recurring_update,
+        recurring::recurring_set_active,
+        recurring::recurring_delete,
+        recurring::recurring_catch_up,
         selftest::storage_selftest,
     ]);
     #[cfg(not(debug_assertions))]
@@ -54,6 +65,15 @@ pub fn run() {
         transactions::transaction_update,
         transactions::transaction_delete,
         transactions::transfer_create,
+        budgets::budgets_list,
+        budgets::budget_set,
+        budgets::budget_delete,
+        recurring::recurring_list,
+        recurring::recurring_create,
+        recurring::recurring_update,
+        recurring::recurring_set_active,
+        recurring::recurring_delete,
+        recurring::recurring_catch_up,
     ]);
 
     builder

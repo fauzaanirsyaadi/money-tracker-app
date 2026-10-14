@@ -3,7 +3,7 @@
 //! `code` is a stable machine-readable string the UI switches on; `message` is
 //! a fixed English sentence. Neither ever contains amounts, names or notes.
 
-use mt_core::{AccountError, MoneyError, TransactionError};
+use mt_core::{AccountError, BudgetError, MoneyError, RuleError, TransactionError};
 use mt_storage::StorageError;
 use serde::Serialize;
 
@@ -96,6 +96,26 @@ impl From<TransactionError> for AppError {
             TransactionError::EmptyName => "name is empty",
             TransactionError::NameTooLong => "name is too long",
             TransactionError::SameAccount => "transfer needs two different accounts",
+        })
+    }
+}
+
+impl From<BudgetError> for AppError {
+    fn from(err: BudgetError) -> Self {
+        Self::invalid(match err {
+            BudgetError::InvalidMonth => "month must be YYYY-MM",
+            BudgetError::NonPositiveLimit => "budget limit must be above zero",
+        })
+    }
+}
+
+impl From<RuleError> for AppError {
+    fn from(err: RuleError) -> Self {
+        Self::invalid(match err {
+            RuleError::NonPositiveAmount => "amount must be above zero",
+            RuleError::EndBeforeStart => "end date is before the start date",
+            RuleError::InvalidNote => "invalid note",
+            RuleError::Schedule(_) => "invalid schedule",
         })
     }
 }

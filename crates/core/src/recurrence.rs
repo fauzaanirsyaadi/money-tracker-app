@@ -22,6 +22,15 @@ pub enum Frequency {
 }
 
 impl Frequency {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+            Self::Yearly => "yearly",
+        }
+    }
+
     pub fn from_code(code: &str) -> Option<Self> {
         match code {
             "daily" => Some(Self::Daily),
@@ -107,6 +116,66 @@ impl Schedule {
             return Err(ScheduleError::InvalidAnchorDay);
         }
         Ok(schedule)
+    }
+
+    pub fn frequency(&self) -> Frequency {
+        self.frequency
+    }
+
+    pub fn every(&self) -> u32 {
+        self.every
+    }
+
+    pub fn anchor_day(&self) -> u8 {
+        self.anchor_day
+    }
+
+    pub fn start(&self) -> Date {
+        self.start
+    }
+
+    pub fn end(&self) -> Option<Date> {
+        self.end
+    }
+
+    /// The first occurrence on or after `from`, or `None` when the schedule has
+    /// ended (past `end`) or runs off the calendar. Used to resume a paused
+    /// rule without back-filling the pause.
+    pub fn first_on_or_after(&self, from: Date) -> Option<Date> {
+        let mut k = self.estimate_index(from).saturating_sub(1);
+        loop {
+            let date = self.nth(k)?;
+            if self.end.is_some_and(|end| date > end) {
+                return None;
+            }
+            if date >= from {
+                return Some(date);
+            }
+            k += 1;
+        }
+    }
+
+    /// A lower-bound guess for the index of the first occurrence >= `from`.
+    fn estimate_index(&self, from: Date) -> u64 {
+        if from <= self.start {
+            return 0;
+        }
+        let every = i64::from(self.every);
+        let estimate = match self.frequency {
+            Frequency::Daily => (from - self.start).whole_days() / every,
+            Frequency::Weekly => (from - self.start).whole_days() / (7 * every),
+            Frequency::Monthly | Frequency::Yearly => {
+                let months = |d: Date| i64::from(d.year()) * 12 + i64::from(d.month() as u8) - 1;
+                let diff = months(from) - months(self.start);
+                let unit = if self.frequency == Frequency::Yearly {
+                    12 * every
+                } else {
+                    every
+                };
+                diff / unit
+            }
+        };
+        u64::try_from(estimate).unwrap_or(0)
     }
 
     /// The `k`-th occurrence (0-based), ignoring `end`. `None` past the
@@ -249,6 +318,158 @@ pub fn format_iso_date(date: Date) -> String {
         date.day()
     )
 }
+
+/// A validated new recurring rule. The schedule's anchor day is the start
+/// date's day of month, so the start is always an occurrence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurringDraft {
+    account_id: i64,
+    category_id: i64,
+    kind: crate::transaction::FlowKind,
+    amount: crate::money::Money,
+    note: String,
+    schedule: Schedule,
+}
+
+impl RecurringDraft {
+    #[allow(clippy::too_many_arguments, reason = "mirrors the rule's columns")]
+    pub fn new(
+        account_id: i64,
+        category_id: i64,
+        kind: crate::transaction::FlowKind,
+        amount: crate::money::Money,
+        note: &str,
+        frequency: Frequency,
+        every: u32,
+        start: Date,
+        end: Option<Date>,
+    ) -> Result<Self, RuleError> {
+        if !amount.is_positive() {
+            return Err(RuleError::NonPositiveAmount);
+        }
+        if end.is_some_and(|end| end < start) {
+            return Err(RuleError::EndBeforeStart);
+        }
+        let schedule = Schedule::new(frequency, every, start.day(), start, end)
+            .map_err(RuleError::Schedule)?;
+        let note = crate::transaction::normalize_note(note).map_err(|_| RuleError::InvalidNote)?;
+        Ok(Self {
+            account_id,
+            category_id,
+            kind,
+            amount,
+            note,
+            schedule,
+        })
+    }
+
+    pub fn account_id(&self) -> i64 {
+        self.account_id
+    }
+
+    pub fn category_id(&self) -> i64 {
+        self.category_id
+    }
+
+    pub fn kind(&self) -> crate::transaction::FlowKind {
+        self.kind
+    }
+
+    /// The positive magnitude.
+    pub fn amount(&self) -> crate::money::Money {
+        self.amount
+    }
+
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    pub fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+
+    /// What is stored: positive for income, negative for expense.
+    pub fn signed_amount(&self) -> crate::money::Money {
+        match self.kind {
+            crate::transaction::FlowKind::Income => self.amount,
+            crate::transaction::FlowKind::Expense => self.amount.negated(),
+        }
+    }
+}
+
+/// The fields of a rule that may change after creation. The schedule and the
+/// kind are fixed: changing them would silently rewrite what "due" means for
+/// transactions already generated, so such a change is a delete and recreate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurringEdit {
+    account_id: i64,
+    category_id: i64,
+    amount: crate::money::Money,
+    note: String,
+    end_on: Option<Date>,
+}
+
+impl RecurringEdit {
+    pub fn new(
+        account_id: i64,
+        category_id: i64,
+        amount: crate::money::Money,
+        note: &str,
+        end_on: Option<Date>,
+    ) -> Result<Self, RuleError> {
+        if !amount.is_positive() {
+            return Err(RuleError::NonPositiveAmount);
+        }
+        Ok(Self {
+            account_id,
+            category_id,
+            amount,
+            note: crate::transaction::normalize_note(note).map_err(|_| RuleError::InvalidNote)?,
+            end_on,
+        })
+    }
+
+    pub fn account_id(&self) -> i64 {
+        self.account_id
+    }
+
+    pub fn category_id(&self) -> i64 {
+        self.category_id
+    }
+
+    pub fn amount(&self) -> crate::money::Money {
+        self.amount
+    }
+
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    pub fn end_on(&self) -> Option<Date> {
+        self.end_on
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleError {
+    NonPositiveAmount,
+    EndBeforeStart,
+    InvalidNote,
+    Schedule(ScheduleError),
+}
+
+impl fmt::Display for RuleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonPositiveAmount => f.write_str("amount must be above zero"),
+            Self::EndBeforeStart => f.write_str("end date is before the start date"),
+            Self::InvalidNote => f.write_str("invalid note"),
+            Self::Schedule(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RuleError {}
 
 #[cfg(test)]
 mod tests {
@@ -512,5 +733,135 @@ mod tests {
             .unwrap();
         assert_eq!(dates(&result.due), ["9998-01-01", "9999-01-01"]);
         assert_eq!(result.next_due, None);
+    }
+
+    // --- resume / first_on_or_after ------------------------------------------------
+
+    #[test]
+    fn first_on_or_after_finds_the_next_occurrence_without_backfilling() {
+        let schedule = monthly("2026-01-15", 15);
+        let at = |s: &str| format_iso_date(schedule.first_on_or_after(d(s)).unwrap());
+        assert_eq!(at("2026-01-01"), "2026-01-15");
+        assert_eq!(at("2026-01-15"), "2026-01-15");
+        assert_eq!(at("2026-01-16"), "2026-02-15");
+        assert_eq!(at("2026-10-14"), "2026-10-15");
+        assert_eq!(at("2026-10-16"), "2026-11-15");
+        assert_eq!(at("2031-03-01"), "2031-03-15");
+    }
+
+    #[test]
+    fn first_on_or_after_respects_every_n_and_other_frequencies() {
+        let quarterly = Schedule::new(Frequency::Monthly, 3, 10, d("2026-01-10"), None).unwrap();
+        assert_eq!(
+            format_iso_date(quarterly.first_on_or_after(d("2026-05-01")).unwrap()),
+            "2026-07-10"
+        );
+
+        let weekly = Schedule::new(Frequency::Weekly, 2, 1, d("2026-01-05"), None).unwrap();
+        assert_eq!(
+            format_iso_date(weekly.first_on_or_after(d("2026-02-03")).unwrap()),
+            "2026-02-16"
+        );
+
+        let daily = Schedule::new(Frequency::Daily, 3, 1, d("2026-01-01"), None).unwrap();
+        assert_eq!(
+            format_iso_date(daily.first_on_or_after(d("2026-01-05")).unwrap()),
+            "2026-01-07"
+        );
+
+        let yearly = Schedule::new(Frequency::Yearly, 1, 29, d("2024-02-29"), None).unwrap();
+        assert_eq!(
+            format_iso_date(yearly.first_on_or_after(d("2026-03-01")).unwrap()),
+            "2027-02-28"
+        );
+    }
+
+    #[test]
+    fn first_on_or_after_is_none_once_the_rule_has_ended() {
+        let schedule = Schedule::new(
+            Frequency::Monthly,
+            1,
+            15,
+            d("2026-01-15"),
+            Some(d("2026-03-15")),
+        )
+        .unwrap();
+        assert_eq!(schedule.first_on_or_after(d("2026-03-16")), None);
+        assert_eq!(
+            schedule
+                .first_on_or_after(d("2026-03-15"))
+                .map(format_iso_date),
+            Some("2026-03-15".to_owned())
+        );
+    }
+
+    #[test]
+    fn first_on_or_after_agrees_with_catch_up_over_many_days() {
+        let schedule = monthly("2026-01-31", 31);
+        let all = schedule
+            .catch_up(d("2026-01-31"), d("2027-12-31"), 100)
+            .unwrap()
+            .due;
+        let mut day = d("2026-01-01");
+        while day <= d("2027-12-31") {
+            let expected = all.iter().copied().find(|x| *x >= day);
+            assert_eq!(
+                schedule
+                    .first_on_or_after(day)
+                    .filter(|x| *x <= d("2027-12-31")),
+                expected,
+                "{day}"
+            );
+            day = day.next_day().unwrap();
+        }
+    }
+
+    // --- RecurringDraft -----------------------------------------------------------------
+
+    #[test]
+    fn a_rule_draft_anchors_on_the_start_day() {
+        use crate::{Currency, FlowKind, Money};
+        let amount = Money::from_minor(1_500_000, Currency::IDR).unwrap();
+        let draft = RecurringDraft::new(
+            1,
+            2,
+            FlowKind::Expense,
+            amount,
+            " sewa ",
+            Frequency::Monthly,
+            1,
+            d("2026-01-31"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(draft.schedule().anchor_day(), 31);
+        assert_eq!(draft.note(), "sewa");
+        assert_eq!(draft.signed_amount().minor(), -1_500_000);
+
+        let bad = |amount: Money, end: Option<Date>, every: u32| {
+            RecurringDraft::new(
+                1,
+                2,
+                FlowKind::Expense,
+                amount,
+                "",
+                Frequency::Monthly,
+                every,
+                d("2026-01-31"),
+                end,
+            )
+        };
+        assert_eq!(
+            bad(Money::zero(Currency::IDR), None, 1),
+            Err(RuleError::NonPositiveAmount)
+        );
+        assert_eq!(
+            bad(amount, Some(d("2026-01-30")), 1),
+            Err(RuleError::EndBeforeStart)
+        );
+        assert_eq!(
+            bad(amount, None, 0),
+            Err(RuleError::Schedule(ScheduleError::InvalidEvery))
+        );
     }
 }

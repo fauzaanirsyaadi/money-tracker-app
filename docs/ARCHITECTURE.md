@@ -511,7 +511,7 @@ base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'
 - Satu transaksi `IMMEDIATE`: semua transaksi baru dan `next_due` maju bersama, atau tidak sama sekali. Idempoten (indeks unik aturan+tanggal, `INSERT OR IGNORE`).
 - Batas per aturan per pembukaan (1.000 sesuai rencana); sisanya dilanjutkan pada pembukaan berikutnya. Aturan di akun/kategori yang diarsipkan tidak disentuh sampai dipulihkan.
 - Aturan melewati `end_on` dinonaktifkan (`active = 0`).
-- **Belum terpasang ke alur aplikasi:** fungsi ini baru dipanggil dari pengujian. Pemanggilan saat aplikasi dibuka (setelah buka-kunci) disambungkan di Fase 5/7 bersama command `recurring_catch_up`.
+- **Terpasang (fitur 3, §19):** UI memanggil `recurring_catch_up` sekali saat aplikasi dibuka. Setelah ada kunci aplikasi (Fase 7), pemanggilan terjadi setelah buka-kunci.
 
 ### Ukuran dasar rilis (arm64, tanpa tanda tangan)
 
@@ -617,3 +617,51 @@ Muatan galat tidak pernah memuat nama, jumlah, atau catatan (ada tesnya).
 - Kategori: belum ada ubah nama/arsip; nama bawaan berbahasa Indonesia.
 - Pencarian `LIKE '%x%'` memindai baris yang lolos filter lain; angka untuk 100 ribu baris diukur di Fase 8 (`EXPLAIN QUERY PLAN`).
 - Tidak ada batas jumlah baris yang dimuat UI selain tombol "Muat lebih banyak"; daftar tervirtualisasi menunggu Fase 6.
+
+---
+
+## 19. Fitur 3: anggaran dan transaksi berulang (Fase 5)
+
+### Anggaran
+
+- Satu batas per (kategori pengeluaran, bulan) di tabel `budgets`; menyimpan lagi untuk pasangan yang sama mengganti batas (upsert, satu baris).
+- **Pengeluaran dihitung dari transaksi `expense` pada bulan itu** (`YYYY-MM-01` s.d. akhir bulan, inklusif). Pemasukan dan transfer tidak pernah dihitung. Anggaran pada kategori induk juga menghitung sub-kategorinya; anggaran sub-kategori tidak menghitung induknya.
+- Progres (`mt_core::progress`): `used_bp` (basis point, dibulatkan setengah-menjauhi-nol), `remaining = limit − spent` (negatif bila terlampaui), dan status:
+  - `warning` bila pemakaian **≥ 80 %**, `over` bila **> 100 %** (tepat 100 % masih `warning`).
+  - Status memakai aritmetika bilangan bulat eksak, bukan `used_bp` yang dibulatkan: 79.999 dari 100.000 menampilkan 80,00 % tetapi tetap `ok` (ditemukan oleh tes).
+- Hanya kategori pengeluaran yang aktif yang dapat dianggarkan; mata uang harus sama dengan instalasi.
+- UI: penelusuran bulan, bilah progres, spanduk "hampir habis"/"terlampaui", ubah batas, hapus dengan konfirmasi dua langkah.
+
+### Transaksi berulang
+
+| Hal | Aturan |
+|---|---|
+| Pembuatan | Jadwal dari tanggal mulai; `anchor_day` = hari pada tanggal mulai, jadi tanggal mulai selalu salah satu kemunculan. `end_on ≥ start_on`. Rekening/kategori divalidasi seperti transaksi biasa |
+| Yang dapat diubah | Rekening, kategori (jenis sama), jumlah, catatan, tanggal berakhir. **Jadwal dan jenis tidak dapat diubah**: mengubahnya akan menulis ulang arti "jatuh tempo" bagi transaksi yang sudah dibuat; caranya hapus lalu buat ulang |
+| Jeda | Menghentikan pembuatan. **Lanjutkan melewati celah**: `next_due` menjadi kemunculan pertama pada/setelah hari ini (atau tetap bila belum jatuh tempo), jadi jeda panjang tidak mengisi mundur transaksi yang sengaja tidak diinginkan |
+| Aturan berakhir | Setelah melewati `end_on` aturan dinonaktifkan dan tidak dapat dilanjutkan |
+| Hapus | Aturan dihapus; transaksi yang sudah dibuat tetap ada dan tidak lagi tertaut |
+| Catch-up | UI memanggil `recurring_catch_up(today)` sekali saat aplikasi dibuka; banner menyebut jumlah transaksi yang dicatat. Idempoten dan dibatasi 1.000 per aturan per pembukaan |
+
+**Tanggal "hari ini"** hanya diketahui UI (kalender lokal perangkat). Backend menerimanya hanya bila berjarak ≤ 2 hari dari tanggal UTC (zona waktu UTC−12..UTC+14), agar nilai salah atau berbahaya tidak menghasilkan transaksi bertahun-tahun.
+
+### Perintah baru
+
+`budgets_list(month)`, `budget_set`, `budget_delete`, `recurring_list`, `recurring_create`, `recurring_update`, `recurring_set_active(id, active, today)`, `recurring_delete`, `recurring_catch_up(today)`.
+
+### Pengujian
+
+| Tingkat | Baru | Mencakup |
+|---|---|---|
+| core | 14 | bulan (parse ketat, awal/akhir bulan, tahun kabisat), progres, ambang eksak, `first_on_or_after` (termasuk kesesuaian dengan catch-up selama 2 tahun), draft/edit aturan |
+| storage | 20 | anggaran: bulan, induk/anak, pemasukan dan transfer tidak dihitung, ambang, upsert, kategori tak valid, hapus; aturan: buat, validasi, ubah, jeda/lanjut tanpa mengisi mundur, aturan selesai, hapus menjaga transaksi, urutan |
+| app | 11 | DTO, kode galat, kewajaran tanggal, catch-up sekali, jeda/lanjut/hapus, ubah |
+| UI | 2 | geser bulan, format bulan |
+| E2E emulator | 22 | anggaran: layar, buat, hitung transaksi lama, 85 % peringatan, 105 % terlampaui dan sisa negatif, bulan terpisah, ubah batas satu baris, hapus berkonfirmasi; berulang: buat, tanpa transaksi dulu, catch-up 4 lalu 0, jeda dan lanjut, kolom jadwal terkunci, ubah jumlah; **catch-up saat aplikasi dibuka ulang**: banner "3 transaksi berulang dicatat", tanggal tepat, tanpa duplikat, pembukaan berikutnya senyap |
+
+### Batasan yang diketahui
+
+- Satu putaran E2E menunjukkan ekspektasi tes saya salah (17 % padahal 21 %); aplikasi benar. Diperbaiki di tes, bukan di kode.
+- Anggaran tidak dibawa otomatis ke bulan berikutnya (harus diatur per bulan); salin-dari-bulan-lalu dapat ditambahkan di Fase 6.
+- Aturan berulang tidak punya "lewati satu kemunculan"; hapus transaksi yang dicatat bila tidak diinginkan.
+- Notifikasi anggaran hanya berupa spanduk di layar Anggaran (tanpa notifikasi sistem, sesuai mode lokal).

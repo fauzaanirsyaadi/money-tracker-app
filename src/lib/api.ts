@@ -159,3 +159,89 @@ export const transactions = {
   transfer: (input: TransferInput) =>
     call<Transaction>("transfer_create", { input }),
 };
+
+export type BudgetStatus = "ok" | "warning" | "over";
+
+export interface Budget {
+  id: number;
+  categoryId: number;
+  categoryName: string;
+  month: string;
+  currency: string;
+  exponent: number;
+  limitMinor: string;
+  spentMinor: string;
+  /** limit - spent; negative once exceeded. */
+  remainingMinor: string;
+  /** Share of the limit used in basis points (10 000 = 100 %). */
+  usedBp: number;
+  status: BudgetStatus;
+}
+
+export const budgets = {
+  list: (month: string) => call<Budget[]>("budgets_list", { month }),
+  set: (input: { categoryId: number; month: string; limitMinor: string }) =>
+    call<Budget>("budget_set", { input }),
+  remove: (id: number) => call<void>("budget_delete", { id }),
+};
+
+export type Frequency = "daily" | "weekly" | "monthly" | "yearly";
+
+export interface RecurringRule {
+  id: number;
+  accountId: number;
+  accountName: string;
+  categoryId: number;
+  categoryName: string;
+  kind: FlowKind;
+  /** Positive magnitude of each occurrence. */
+  amountMinor: string;
+  currency: string;
+  exponent: number;
+  note: string;
+  frequency: Frequency;
+  every: number;
+  startOn: string;
+  endOn: string | null;
+  nextDue: string;
+  active: boolean;
+}
+
+export interface RecurringInput {
+  accountId: number;
+  categoryId: number;
+  kind: FlowKind;
+  amountMinor: string;
+  note: string;
+  frequency: Frequency;
+  every: number;
+  startOn: string;
+  endOn: string | null;
+}
+
+export interface RecurringEditInput {
+  accountId: number;
+  categoryId: number;
+  amountMinor: string;
+  note: string;
+  endOn: string | null;
+}
+
+export interface CatchUpReport {
+  rulesAdvanced: number;
+  transactionsCreated: number;
+  rulesFinished: number;
+  rulesInvalid: number;
+}
+
+export const recurring = {
+  list: () => call<RecurringRule[]>("recurring_list"),
+  create: (input: RecurringInput) => call<RecurringRule>("recurring_create", { input }),
+  update: (id: number, input: RecurringEditInput) =>
+    call<RecurringRule>("recurring_update", { id, input }),
+  setActive: (id: number, active: boolean, today: string) =>
+    call<RecurringRule>("recurring_set_active", { id, active, today }),
+  remove: (id: number) => call<void>("recurring_delete", { id }),
+  /** Run once when the app opens; records every occurrence now due. */
+  catchUp: (today: string) => call<CatchUpReport>("recurring_catch_up", { today }),
+};

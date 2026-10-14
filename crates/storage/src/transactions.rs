@@ -104,7 +104,7 @@ pub struct Page {
     pub next: Option<Cursor>,
 }
 
-fn check_account(
+pub(crate) fn check_account(
     conn: &Connection,
     id: i64,
     currency: Currency,
@@ -127,7 +127,7 @@ fn check_account(
     Ok(())
 }
 
-fn check_category(
+pub(crate) fn check_category(
     conn: &Connection,
     id: i64,
     kind: FlowKind,
