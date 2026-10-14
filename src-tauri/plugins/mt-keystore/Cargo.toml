@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-mt-keystore"
+description = "Wraps the database key with an Android Keystore key. No JS-facing commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+links = "tauri-plugin-mt-keystore"
+
+[dependencies]
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[lints]
+workspace = true

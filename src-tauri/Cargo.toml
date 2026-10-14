@@ -20,6 +20,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+mt-storage = { path = "../crates/storage" }
+tauri-plugin-mt-keystore = { path = "plugins/mt-keystore" }
+serde = { version = "1", features = ["derive"] }
+# OS random bytes for the database key. Already in the tree via tauri; MIT OR Apache-2.0, rust-random.
+getrandom = "0.3"
+# Wipes key material from memory. Apache-2.0 OR MIT, RustCrypto, maintained.
+zeroize = "1"
 
 [lints]
 workspace = true

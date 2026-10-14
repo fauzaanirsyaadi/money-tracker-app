@@ -8,6 +8,11 @@ publish.workspace = true
 
 [dependencies]
 mt-core = { path = "../core" }
+# SQLite + SQLCipher compiled from source; OpenSSL is vendored because Android
+# has no system OpenSSL. MIT, actively maintained (rusqlite org).
+rusqlite = { version = "0.40", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+# Wipes key material from memory. Apache-2.0 OR MIT, RustCrypto, maintained.
+zeroize = "1"
 
 [lints]
 workspace = true

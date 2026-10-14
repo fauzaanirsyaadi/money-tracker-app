@@ -316,9 +316,9 @@ Versi stabil plugin (2.x) dipilih; seri 3.0.0-alpha **tidak** dipakai.
 
 | # | Risiko | Cara dibuktikan | Fase |
 |---|---|---|---|
-| R1 | `rusqlite` `bundled-sqlcipher` biasa butuh OpenSSL sistem; di Android perlu `bundled-sqlcipher-vendored-openssl` (kompilasi OpenSSL per ABI, butuh `perl`/`make`/NDK, build lama). Gagal untuk salah satu dari 4 ABI = blocker | Spike: kompilasi dan buka DB terenkripsi di arm64, armv7, x86, x86_64 | 3 |
-| R2 | Keystore dari Rust: tidak ada plugin resmi. Perlu plugin Kotlin kecil; StrongBox tidak ada di semua perangkat | Spike di perangkat asli: generate, wrap, unwrap, DB tak bisa dibuka tanpa kunci | 3 |
-| R3 | Alignment halaman 16 KB untuk pustaka native (syarat Android 15+/Play) pada `.so` hasil NDK | Periksa NDK versi baru + `zipalign -P 16`/`llvm-readelf` pada APK | 2–3 |
+| R1 | `bundled-sqlcipher` biasa butuh OpenSSL sistem; di Android perlu `bundled-sqlcipher-vendored-openssl` | **Terselesaikan (Fase 3):** fitur vendored dipakai; `mt-storage` dan pustaka aplikasi ter-link untuk keempat ABI (lihat bagian 15) | 3 |
+| R2 | Keystore dari Rust: perlu plugin Kotlin kecil; StrongBox tidak ada di semua perangkat | **Sebagian (Fase 3):** plugin `mt-keystore` bekerja di emulator (tingkat `software`). Tingkat perangkat keras (`tee`/`strongbox`) **belum terbukti** — perlu HP asli | 3 |
+| R3 | Alignment halaman 16 KB untuk pustaka native | **Terselesaikan (Fase 3):** NDK r27 menghasilkan 4 KB; `src-tauri/build.rs` menambah `-z max-page-size=16384`; semua ABI terverifikasi `0x4000` | 2–3 |
 | R4 | `forbid(unsafe_code)` vs `mobile_entry_point` | Kompilasi target Android | 2 |
 | R5 | Menulis/membaca URI `content://` dari SAF lewat plugin dialog/fs: perilaku di Android harus dibuktikan | Ekspor dan impor satu berkas di perangkat asli | 7 |
 | R6 | `FLAG_SECURE` dan `allowBackup=false` ada di `src-tauri/gen/android` yang bisa ditimpa regenerasi | Taruh di plugin/template; tambah cek CI atas manifest hasil merge | 4, 7 |
@@ -363,3 +363,42 @@ Versi stabil plugin (2.x) dipilih; seri 3.0.0-alpha **tidak** dipakai.
 - **ID UUID/ULID:** ditolak untuk v1; `INTEGER PRIMARY KEY` lebih kecil dan cepat. Sinkronisasi di masa depan akan menambahkan kolom ID global lewat migrasi.
 - **Layanan latar belakang untuk transaksi berulang:** ditolak (aturan mode lokal); catch-up saat buka.
 - **Crate migrasi (`rusqlite_migration`, dll.):** ditolak; `user_version` + SQL tersemat cukup.
+
+---
+
+## 15. Hasil spike Fase 3 (2026-10-14)
+
+Lingkungan: macOS arm64, Rust 1.98, NDK 27.2.12479018, JDK 21, `minSdk` 24 (generator Tauri; target K8 = 26 belum diterapkan), emulator Pixel 6 / Android 15 arm64 (`google_apis`).
+
+### Yang berhasil
+
+| Uji | Hasil |
+|---|---|
+| `Money`/`Currency` (`mt-core`) | 26 tes lulus: batas ±(2^53−1), overflow tanpa wrap, pembulatan setengah-menjauhi-nol, `allocate` largest-remainder, parse/format kanonik |
+| Skema v1 + migrasi (`mt-storage`) | 10 tes lulus di host: `CHECK` tanda per `kind`, transfer, FK `RESTRICT`, unik berulang/anggaran, tolak skema lebih baru, berkas terenkripsi |
+| SQLCipher + OpenSSL vendored, 4 ABI | `aarch64`, `armv7`, `i686`, `x86_64`: kompilasi dan link pustaka aplikasi **OK** (±40–46 dtk per ABI, API 26) |
+| Alignment segmen LOAD | `0x4000` untuk keempat ABI (setelah perbaikan `build.rs`) |
+| Plugin Keystore (Kotlin) | Kunci AES-256-GCM tak-dapat-diekspor; `wrap`/`unwrap` bekerja; blob 60 byte (12 IV + 32 kunci + 16 tag) |
+| DB terenkripsi di perangkat | Di emulator: DB terbuka, `user_version = 1`, header **bukan** plaintext, kunci acak ditolak, blob terbungkus bukan kunci, terbuka kembali setelah proses dimulai ulang |
+| Kunci tak terjangkau WebView | Plugin tidak mendaftarkan command; hanya API Rust (`MtKeystoreExt`) |
+
+### Yang belum terbukti / gagal
+
+| Hal | Status |
+|---|---|
+| Keystore berperangkat keras | Emulator melaporkan `software`. `tee`/`strongbox` hanya dapat dibuktikan di HP asli |
+| Penolakan DB tanpa Keystore | Terbukti lewat kunci salah; skenario "kunci Keystore hilang/diinvalidasi" belum diuji di perangkat |
+| `setUnlockedDeviceRequired(true)` | **Sengaja tidak dipakai** di spike: risiko tak terbaca pada perangkat tanpa layar kunci belum dipahami. Putuskan di Fase 7 |
+| Pustaka rilis | Hanya build debug yang diukur. `.so` debug 145–164 MB, APK debug (arm64) ±285 MB. Ukuran rilis diukur di Fase 8 |
+| Build 4-ABI via Gradle | Hanya `aarch64` dibangun sebagai APK; ABI lain hanya diuji sampai link |
+| CI | Job `android` belum pernah berjalan; NDK 27.2 dan JDK 17 belum diuji di CI |
+
+### Keputusan dari spike
+
+1. `rusqlite` memakai `bundled-sqlcipher-vendored-openssl` (menjalankan K7).
+2. Alignment 16 KB diatur di `src-tauri/build.rs`, bukan `.cargo/config.toml` (Tauri menyetel `CARGO_TARGET_*_RUSTFLAGS`, yang mengalahkan konfigurasi berkas).
+3. Plugin Keystore tidak mengekspos command ke JS; kunci hanya dapat diminta dari Rust.
+4. Kunci DB dibuat dengan `getrandom` di Rust, lalu dibungkus; berkas `db.key` ditulis dengan tulis-lalu-ganti-nama.
+5. Bila `money.db` ada tetapi `db.key` hilang, aplikasi **menolak** membuat kunci baru (mencegah data tak terbaca diam-diam menimpa).
+6. `cargo check --target <android>` polos kini membutuhkan toolchain NDK di `PATH` (OpenSSL dikompilasi dari sumber); build lewat `pnpm tauri android build` menyetelnya sendiri. Cek cepat Android di CI dilakukan lewat job `android`, bukan `cargo check` terpisah.
+7. Perintah uji mandiri `storage_selftest` hanya ada di build debug (`cfg(debug_assertions)`), tanpa kunci atau data keuangan di keluaran; dihapus bersama pemasangan alur buka-kunci di Fase 7.
