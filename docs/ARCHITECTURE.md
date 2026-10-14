@@ -665,3 +665,58 @@ Muatan galat tidak pernah memuat nama, jumlah, atau catatan (ada tesnya).
 - Anggaran tidak dibawa otomatis ke bulan berikutnya (harus diatur per bulan); salin-dari-bulan-lalu dapat ditambahkan di Fase 6.
 - Aturan berulang tidak punya "lewati satu kemunculan"; hapus transaksi yang dicatat bila tidak diinginkan.
 - Notifikasi anggaran hanya berupa spanduk di layar Anggaran (tanpa notifikasi sistem, sesuai mode lokal).
+
+---
+
+## 20. Fitur 4: laporan (Fase 5)
+
+Semua agregasi dilakukan di SQLite; Rust hanya melakukan pembulatan bilangan bulat dan mengisi bulan kosong; UI hanya memformat dan menggambar (aturan lapisan §2 butir 5).
+
+### Tiga laporan
+
+| Laporan | Command | Definisi |
+|---|---|---|
+| Pengeluaran per kategori | `report_spending(from, to)` | Jumlah `-amount_minor` untuk `kind = 'expense'`, periode inklusif, dikelompokkan per kategori lalu digulung ke induknya. Tiap induk menyertakan daftar anak, jumlah transaksi, dan `share_bp`. Urut dari terbesar, lalu nama |
+| Tren bulanan | `report_trend(from, to)` | Per bulan: pemasukan, pengeluaran, `net = pemasukan − pengeluaran`, dan **kekayaan bersih akhir bulan**. Bulan tanpa aktivitas tetap muncul dengan arus nol. Maksimal 120 bulan |
+| Kekayaan bersih | `report_net_worth()` | `Σ saldo awal + Σ semua transaksi`, per rekening dan total. Rekening yang diarsipkan tetap dihitung karena masih menyimpan uang |
+
+### Aturan bersama
+
+- **Transfer tidak pernah menjadi pemasukan atau pengeluaran** (hanya memindahkan uang antar rekening sendiri) dan membatalkan dirinya pada kekayaan bersih.
+- **Saldo awal dianggap sudah ada sebelum bulan pertama** pada tren; saldo awal tidak punya tanggal.
+- `share_bp` dibulatkan per baris (setengah-menjauhi-nol), sehingga kolom bisa berjumlah 99,99–100,01 %. Bila diperlukan total tepat 100 %, gunakan `Money::allocate` untuk tampilan.
+- Penjumlahan memakai `i128` sebelum dikembalikan ke `Money`, jadi kelebihan rentang dilaporkan (`InvalidData`), tidak di-wrap.
+- Titik terakhir tren sama dengan `report_net_worth().total` bila tidak ada transaksi bertanggal masa depan (diuji).
+
+### UI
+
+Layar **Laporan**: kekayaan bersih dan rincian rekening; pengeluaran per kategori dengan penelusuran bulan, bilah proporsional, dan rincian anak yang dapat dibuka; tren 6 bulan dengan bilah pemasukan/pengeluaran, net, dan kekayaan. Bilah memakai `percentOf` berbasis BigInt dan CSS biasa (tanpa pustaka grafik), jadi bundel tetap kecil.
+
+### Pengujian
+
+| Tingkat | Baru | Mencakup |
+|---|---|---|
+| core | 1 | aritmetika bulan (`plus_months`, `index`) |
+| storage | 14 | pengelompokan, urutan, pembagian, gulungan anak, anak tunggal, periode inklusif, tanpa pemasukan dan transfer, periode kosong, bulan kosong dan kekayaan terbawa, transaksi sebelum jendela, transfer netral, kecocokan dengan laporan kekayaan, validasi rentang, negatif dan terarsip |
+| app | 5 | DTO string, periode salah, tren bertanda, rentang tak valid, kekayaan |
+| UI | 4 | skala batang eksak, maks, format persen |
+| E2E emulator | 8 | **oracle independen**: kekayaan, pengeluaran Oktober (induk dan anak), tren 6 bulan termasuk kekayaan akhir bulan, dihitung ulang dari seluruh transaksi mentah dan dicocokkan; layar; rincian; bulan lain |
+
+### Batasan yang diketahui
+
+- Performa pada 100 ribu baris diukur di Fase 8 (`EXPLAIN QUERY PLAN`); kueri memakai `idx_tx_date`, `idx_tx_category`, dan `idx_tx_account`.
+- Satu mata uang (K1); laporan tidak mengonversi.
+- Belum ada ekspor laporan atau filter per rekening.
+
+---
+
+## 21. Status Fase 5
+
+| Fitur | Status |
+|---|---|
+| 1 Akun | Selesai (§17) |
+| 2 Transaksi, kategori, transfer, daftar berhalaman | Selesai (§18) |
+| 3 Anggaran dan transaksi berulang | Selesai (§19) |
+| 4 Laporan | Selesai (§20) |
+
+Ruang lingkup v1 yang belum ada: kunci aplikasi (PIN/biometrik), `FLAG_SECURE`, backup dan restore terenkripsi (semuanya Fase 7), serta sistem desain dan input 2 ketukan (Fase 6).

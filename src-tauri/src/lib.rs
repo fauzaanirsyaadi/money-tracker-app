@@ -4,6 +4,7 @@ mod accounts;
 mod budgets;
 mod error;
 mod recurring;
+mod reports;
 mod state;
 mod transactions;
 mod vault;
@@ -50,6 +51,9 @@ pub fn run() {
         recurring::recurring_set_active,
         recurring::recurring_delete,
         recurring::recurring_catch_up,
+        reports::report_spending,
+        reports::report_trend,
+        reports::report_net_worth,
         selftest::storage_selftest,
     ]);
     #[cfg(not(debug_assertions))]
@@ -74,6 +78,9 @@ pub fn run() {
         recurring::recurring_set_active,
         recurring::recurring_delete,
         recurring::recurring_catch_up,
+        reports::report_spending,
+        reports::report_trend,
+        reports::report_net_worth,
     ]);
 
     builder

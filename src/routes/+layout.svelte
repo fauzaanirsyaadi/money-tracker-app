@@ -12,6 +12,7 @@
     { href: "/transactions", label: "Transaksi" },
     { href: "/budgets", label: "Anggaran" },
     { href: "/recurring", label: "Berulang" },
+    { href: "/reports", label: "Laporan" },
   ];
 
   let notice = $state("");

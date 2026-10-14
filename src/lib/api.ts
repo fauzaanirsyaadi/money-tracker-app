@@ -245,3 +245,59 @@ export const recurring = {
   /** Run once when the app opens; records every occurrence now due. */
   catchUp: (today: string) => call<CatchUpReport>("recurring_catch_up", { today }),
 };
+
+export interface ChildSpending {
+  categoryId: number;
+  name: string;
+  spentMinor: string;
+  count: number;
+}
+
+export interface CategorySpending {
+  categoryId: number;
+  name: string;
+  spentMinor: string;
+  count: number;
+  /** Basis points of all spending in the period (10 000 = 100 %). */
+  shareBp: number;
+  children: ChildSpending[];
+}
+
+export interface SpendingReport {
+  from: string;
+  to: string;
+  currency: string;
+  exponent: number;
+  totalMinor: string;
+  categories: CategorySpending[];
+}
+
+export interface MonthSummary {
+  month: string;
+  incomeMinor: string;
+  expenseMinor: string;
+  /** income - expense, signed. */
+  netMinor: string;
+  /** Net worth at the end of the month, signed. */
+  netWorthMinor: string;
+}
+
+export interface Trend {
+  currency: string;
+  exponent: number;
+  months: MonthSummary[];
+}
+
+export interface NetWorth {
+  currency: string;
+  exponent: number;
+  totalMinor: string;
+  accounts: Account[];
+}
+
+export const reports = {
+  spending: (from: string, to: string) =>
+    call<SpendingReport>("report_spending", { from, to }),
+  trend: (from: string, to: string) => call<Trend>("report_trend", { from, to }),
+  netWorth: () => call<NetWorth>("report_net_worth"),
+};

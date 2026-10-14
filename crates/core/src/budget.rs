@@ -62,6 +62,20 @@ impl YearMonth {
         Self::new(year, month)
     }
 
+    /// Months since year 0: a total order that makes month arithmetic trivial.
+    pub fn index(self) -> i64 {
+        i64::from(self.year) * 12 + i64::from(self.month) - 1
+    }
+
+    /// The month `delta` months away (negative goes back).
+    pub fn plus_months(self, delta: i32) -> Result<Self, BudgetError> {
+        let index = self.index() + i64::from(delta);
+        let year = i32::try_from(index.div_euclid(12)).map_err(|_| BudgetError::InvalidMonth)?;
+        let month =
+            u8::try_from(index.rem_euclid(12) + 1).map_err(|_| BudgetError::InvalidMonth)?;
+        Self::new(year, month)
+    }
+
     pub fn of(date: Date) -> Self {
         Self {
             year: date.year(),
@@ -237,6 +251,18 @@ mod tests {
             (first.year(), first.month() as u8, first.day()),
             (2026, 10, 1)
         );
+    }
+
+    #[test]
+    fn month_arithmetic_crosses_year_boundaries() {
+        let m = |s: &str| YearMonth::parse(s).unwrap();
+        assert_eq!(m("2026-12").plus_months(1), Ok(m("2027-01")));
+        assert_eq!(m("2026-01").plus_months(-1), Ok(m("2025-12")));
+        assert_eq!(m("2026-10").plus_months(0), Ok(m("2026-10")));
+        assert_eq!(m("2026-10").plus_months(-23), Ok(m("2024-11")));
+        assert_eq!(m("0000-01").plus_months(-1), Err(BudgetError::InvalidMonth));
+        assert_eq!(m("9999-12").plus_months(1), Err(BudgetError::InvalidMonth));
+        assert_eq!(m("2026-03").index() - m("2025-03").index(), 12);
     }
 
     #[test]
