@@ -1,0 +1,10 @@
+[package]
+name = "mt-core"
+description = "Domain logic for Money Tracker: Money, business rules, reports. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

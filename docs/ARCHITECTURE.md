@@ -65,9 +65,11 @@ src (UI) ──invoke──▶ app ──▶ storage ──▶ core
 | `storage` | `Db` (open/key/migrate), repository per entitas, query laporan, ekspor/impor logis | `rusqlite` (`bundled-sqlcipher*`) |
 | `app` | `AppState`, command, `AppError`, plugin biometrik/keystore/dialog, DTO `serde` | `tauri`, `serde`, `serde_json`, `zeroize`, `argon2`, `chacha20poly1305`, plugin resmi |
 
+**[KEPUTUSAN, Fase 2]** Nama paket Cargo adalah `mt-core` dan `mt-storage` (direktori tetap `crates/core` dan `crates/storage`), karena paket bernama `core` bentrok dengan crate `core` milik Rust.
+
 **[KEPUTUSAN]** DTO untuk IPC (dengan `serde`) berada di crate `app`, bukan di `core`, agar `core` tetap tanpa dependensi dan bentuk IPC bisa berubah tanpa menyentuh domain.
 
-**[KEPUTUSAN]** `#![forbid(unsafe_code)]` dipasang di `core`, `storage`, dan `app`. **[RISIKO]** makro `#[tauri::mobile_entry_point]` menghasilkan `extern "C"`/`no_mangle`, yang di edisi 2024 adalah atribut unsafe dan bisa memicu lint `forbid`. Jika terbukti, `app` memakai `#![deny(unsafe_code)]` dengan satu `#[allow(unsafe_code)]` sempit pada titik masuk, dicatat di SECURITY.md. Diuji di Fase 2 (hanya terlihat saat target Android dikompilasi).
+**[KEPUTUSAN]** `#![forbid(unsafe_code)]` dipasang di `core`, `storage`, dan `app`. **[RISIKO — terselesaikan di Fase 2: `cargo check --target aarch64-linux-android` lulus dengan `forbid`; konfirmasi akhir saat APK dibangun]** makro `#[tauri::mobile_entry_point]` menghasilkan `extern "C"`/`no_mangle`, yang di edisi 2024 adalah atribut unsafe dan bisa memicu lint `forbid`. Jika terbukti, `app` memakai `#![deny(unsafe_code)]` dengan satu `#[allow(unsafe_code)]` sempit pada titik masuk, dicatat di SECURITY.md. Diuji di Fase 2 (hanya terlihat saat target Android dikompilasi).
 
 ---
 
