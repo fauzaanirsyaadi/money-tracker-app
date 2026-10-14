@@ -16,6 +16,12 @@ pub enum StorageError {
     Constraint,
     /// The row does not exist.
     NotFound,
+    /// The account or category is archived and cannot take new activity.
+    Archived,
+    /// The category's kind (income/expense) does not match the transaction.
+    KindMismatch,
+    /// The operation is not allowed on a transfer leg.
+    TransferLeg,
     /// A currency different from the app's (or the account's) was supplied.
     CurrencyMismatch,
     /// A stored value could not be read back (unknown code, out-of-range amount).
@@ -38,6 +44,9 @@ impl fmt::Display for StorageError {
             Self::Duplicate => f.write_str("duplicate value"),
             Self::Constraint => f.write_str("constraint violated"),
             Self::NotFound => f.write_str("not found"),
+            Self::Archived => f.write_str("archived"),
+            Self::KindMismatch => f.write_str("category kind mismatch"),
+            Self::TransferLeg => f.write_str("not allowed on a transfer leg"),
             Self::CurrencyMismatch => f.write_str("currency mismatch"),
             Self::InvalidData => f.write_str("invalid stored data"),
             Self::Sqlite { code } => write!(f, "sqlite error {code}"),

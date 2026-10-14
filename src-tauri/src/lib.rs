@@ -3,6 +3,7 @@
 mod accounts;
 mod error;
 mod state;
+mod transactions;
 mod vault;
 
 #[cfg(debug_assertions)]
@@ -31,6 +32,13 @@ pub fn run() {
         accounts::account_create,
         accounts::account_update,
         accounts::account_archive,
+        transactions::categories_list,
+        transactions::category_create,
+        transactions::transactions_list,
+        transactions::transaction_create,
+        transactions::transaction_update,
+        transactions::transaction_delete,
+        transactions::transfer_create,
         selftest::storage_selftest,
     ]);
     #[cfg(not(debug_assertions))]
@@ -39,6 +47,13 @@ pub fn run() {
         accounts::account_create,
         accounts::account_update,
         accounts::account_archive,
+        transactions::categories_list,
+        transactions::category_create,
+        transactions::transactions_list,
+        transactions::transaction_create,
+        transactions::transaction_update,
+        transactions::transaction_delete,
+        transactions::transfer_create,
     ]);
 
     builder

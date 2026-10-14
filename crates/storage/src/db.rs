@@ -9,7 +9,10 @@ use crate::error::StorageError;
 
 /// Ordered, append-only list of migrations. Migration `n` (1-based) moves
 /// `PRAGMA user_version` from `n - 1` to `n`.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_categories.sql"),
+];
 
 /// Raw 256-bit SQLCipher key. Generated and wrapped by the platform layer.
 pub type DbKey = Zeroizing<[u8; 32]>;
@@ -223,7 +226,9 @@ mod tests {
         let again = Db::open(&path, &key(7)).unwrap();
         let name: String = again
             .conn()
-            .query_row("SELECT name FROM categories", [], |r| r.get(0))
+            .query_row("SELECT name FROM categories WHERE name = 'Food'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(name, "Food");
     }
@@ -235,6 +240,46 @@ mod tests {
         Db::open(&path, &key(3)).unwrap();
         let db = Db::open(&path, &key(3)).unwrap();
         assert_eq!(db.schema_version(), Ok(Db::SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn a_version_1_database_upgrades_and_keeps_its_data() {
+        let dir = TempDir::new();
+        let path = dir.file();
+        {
+            // Build exactly what the first release would have left on disk.
+            let conn = Connection::open(&path).unwrap();
+            apply_key(&conn, &key(5)).unwrap();
+            conn.execute_batch(&format!(
+                "BEGIN;\n{}\nPRAGMA user_version = 1;\nCOMMIT;
+                 INSERT INTO accounts(name,kind,currency,opening_balance_minor,created_at)
+                 VALUES('Lama','cash','IDR',42,0);",
+                MIGRATIONS[0]
+            ))
+            .unwrap();
+        }
+        let db = Db::open(&path, &key(5)).unwrap();
+        assert_eq!(db.schema_version(), Ok(Db::SCHEMA_VERSION));
+        let categories: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM categories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(categories, 12);
+        let opening: i64 = db
+            .conn()
+            .query_row("SELECT opening_balance_minor FROM accounts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(opening, 42);
+        // Opening it again must not seed a second time.
+        drop(db);
+        let again = Db::open(&path, &key(5)).unwrap();
+        let categories: i64 = again
+            .conn()
+            .query_row("SELECT count(*) FROM categories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(categories, 12);
     }
 
     #[test]

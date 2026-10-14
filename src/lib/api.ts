@@ -24,11 +24,77 @@ export interface AccountInput {
   openingBalanceMinor: string;
 }
 
+export type FlowKind = "income" | "expense";
+export type RecordKind = FlowKind | "transfer_out" | "transfer_in";
+
+export interface Category {
+  id: number;
+  name: string;
+  kind: FlowKind;
+  parentId: number | null;
+  archived: boolean;
+}
+
+export interface Transaction {
+  id: number;
+  accountId: number;
+  accountName: string;
+  categoryId: number | null;
+  categoryName: string | null;
+  kind: RecordKind;
+  /** Signed minor units. */
+  amountMinor: string;
+  currency: string;
+  exponent: number;
+  note: string;
+  occurredOn: string;
+  transferGroupId: number | null;
+  recurring: boolean;
+}
+
+export interface TransactionInput {
+  accountId: number;
+  categoryId: number;
+  kind: FlowKind;
+  /** Positive magnitude in minor units. */
+  amountMinor: string;
+  note: string;
+  occurredOn: string;
+}
+
+export interface TransferInput {
+  fromAccountId: number;
+  toAccountId: number;
+  amountMinor: string;
+  note: string;
+  occurredOn: string;
+}
+
+export interface TransactionFilter {
+  accountId?: number;
+  categoryId?: number;
+  kind?: "income" | "expense" | "transfer";
+  from?: string;
+  to?: string;
+  search?: string;
+}
+
+export interface Cursor {
+  occurredOn: string;
+  id: number;
+}
+
+export interface TransactionPage {
+  items: Transaction[];
+  next: Cursor | null;
+}
+
 export type ErrorCode =
   | "unavailable"
   | "invalid_input"
   | "not_found"
   | "name_in_use"
+  | "archived"
   | "currency_mismatch"
   | "amount_out_of_range"
   | "internal";
@@ -66,4 +132,30 @@ export const accounts = {
     call<Account>("account_update", { id, input }),
   archive: (id: number, archived: boolean) =>
     call<Account>("account_archive", { id, archived }),
+};
+
+export const categories = {
+  list: (includeArchived = false) =>
+    call<Category[]>("categories_list", { includeArchived }),
+  create: (input: { name: string; kind: FlowKind; parentId?: number }) =>
+    call<Category>("category_create", {
+      input: { parentId: null, ...input },
+    }),
+};
+
+export const transactions = {
+  list: (filter: TransactionFilter = {}, cursor?: Cursor | null, limit = 50) =>
+    call<TransactionPage>("transactions_list", {
+      filter,
+      cursor: cursor ?? null,
+      limit,
+    }),
+  create: (input: TransactionInput) =>
+    call<Transaction>("transaction_create", { input }),
+  update: (id: number, input: TransactionInput) =>
+    call<Transaction>("transaction_update", { id, input }),
+  /** Resolves to the number of rows removed (2 for a transfer). */
+  remove: (id: number) => call<number>("transaction_delete", { id }),
+  transfer: (input: TransferInput) =>
+    call<Transaction>("transfer_create", { input }),
 };

@@ -11,7 +11,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "test": "node --experimental-strip-types --test src/lib/money.test.ts"
+    "test": "node --experimental-strip-types --test src/lib/*.test.ts"
   },
   "license": "MIT",
   "dependencies": {

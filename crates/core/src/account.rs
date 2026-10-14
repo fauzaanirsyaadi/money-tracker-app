@@ -55,21 +55,38 @@ impl fmt::Display for AccountError {
 
 impl std::error::Error for AccountError {}
 
+/// What can be wrong with a user-supplied piece of text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextProblem {
+    Empty,
+    TooLong,
+    /// Control characters (newlines, tabs, NUL, ...) are not allowed.
+    ControlCharacter,
+}
+
+/// Trims, then checks emptiness, control characters and length (in characters,
+/// matching SQLite's `length()`).
+pub(crate) fn clean_text(raw: &str, max_chars: usize) -> Result<String, TextProblem> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err(TextProblem::Empty);
+    }
+    if text.chars().any(char::is_control) {
+        return Err(TextProblem::ControlCharacter);
+    }
+    if text.chars().count() > max_chars {
+        return Err(TextProblem::TooLong);
+    }
+    Ok(text.to_owned())
+}
+
 /// Trims surrounding whitespace and validates an account name.
-///
-/// Length counts characters (not bytes), matching SQLite's `length()`.
 pub fn normalize_account_name(raw: &str) -> Result<String, AccountError> {
-    let name = raw.trim();
-    if name.is_empty() {
-        return Err(AccountError::EmptyName);
-    }
-    if name.chars().any(char::is_control) {
-        return Err(AccountError::InvalidCharacters);
-    }
-    if name.chars().count() > MAX_NAME_CHARS {
-        return Err(AccountError::NameTooLong);
-    }
-    Ok(name.to_owned())
+    clean_text(raw, MAX_NAME_CHARS).map_err(|problem| match problem {
+        TextProblem::Empty => AccountError::EmptyName,
+        TextProblem::TooLong => AccountError::NameTooLong,
+        TextProblem::ControlCharacter => AccountError::InvalidCharacters,
+    })
 }
 
 /// A validated new account. Its currency is the opening balance's currency.

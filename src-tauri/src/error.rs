@@ -3,7 +3,7 @@
 //! `code` is a stable machine-readable string the UI switches on; `message` is
 //! a fixed English sentence. Neither ever contains amounts, names or notes.
 
-use mt_core::{AccountError, MoneyError};
+use mt_core::{AccountError, MoneyError, TransactionError};
 use mt_storage::StorageError;
 use serde::Serialize;
 
@@ -15,6 +15,8 @@ pub enum ErrorCode {
     InvalidInput,
     NotFound,
     NameInUse,
+    /// The account or category is archived.
+    Archived,
     CurrencyMismatch,
     AmountOutOfRange,
     Internal,
@@ -48,6 +50,13 @@ impl From<StorageError> for AppError {
             StorageError::CurrencyMismatch => {
                 Self::new(ErrorCode::CurrencyMismatch, "currency does not match")
             }
+            StorageError::Archived => {
+                Self::new(ErrorCode::Archived, "account or category is archived")
+            }
+            StorageError::KindMismatch => Self::invalid("category does not match the kind"),
+            StorageError::TransferLeg => {
+                Self::invalid("a transfer leg cannot be edited; delete and recreate the transfer")
+            }
             StorageError::Constraint => Self::invalid("value rejected by a rule"),
             StorageError::InvalidData => {
                 Self::new(ErrorCode::AmountOutOfRange, "stored value is out of range")
@@ -75,5 +84,18 @@ impl From<MoneyError> for AppError {
             }
             _ => Self::invalid("invalid amount"),
         }
+    }
+}
+
+impl From<TransactionError> for AppError {
+    fn from(err: TransactionError) -> Self {
+        Self::invalid(match err {
+            TransactionError::NonPositiveAmount => "amount must be above zero",
+            TransactionError::NoteTooLong => "note is too long",
+            TransactionError::InvalidCharacters => "text has invalid characters",
+            TransactionError::EmptyName => "name is empty",
+            TransactionError::NameTooLong => "name is too long",
+            TransactionError::SameAccount => "transfer needs two different accounts",
+        })
     }
 }

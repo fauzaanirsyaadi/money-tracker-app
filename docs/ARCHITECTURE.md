@@ -577,3 +577,43 @@ Muatan galat tidak pernah memuat nama, jumlah, atau catatan (ada tesnya).
 - Build **desktop** tidak punya Keystore, jadi `pnpm tauri dev` di macOS menampilkan pesan itu. Iterasi UI cepat memakai emulator, atau dapat ditambahkan kunci khusus-debug di desktop bila diperlukan (belum dilakukan).
 - Tampilan baru fungsional; sistem desain ada di Fase 6.
 - Ikon, urutan manual (`sort_order` ada tetapi belum dapat diubah), dan pilihan mata uang menunggu fase berikutnya.
+
+---
+
+## 18. Fitur 2: transaksi dan kategori (Fase 5)
+
+### Lapisan
+
+| Lapisan | Isi |
+|---|---|
+| `mt-core` | `FlowKind` (income/expense), `TransactionDraft` (jumlah = besaran positif; tanda diturunkan dari jenis sekali saja), `TransferDraft` (dua akun berbeda, jumlah positif), `CategoryDraft`, normalisasi catatan (≤500 karakter, boleh kosong) |
+| `mt-storage` | Migrasi 0002 (indeks unik kategori aktif + 12 kategori bawaan); `create/update/delete_transaction`, `create_transfer`, `transactions(filter, cursor, limit)`, `categories`, `create_category` |
+| `src-tauri` | `categories_list`, `category_create`, `transactions_list`, `transaction_create`, `transaction_update`, `transaction_delete`, `transfer_create` |
+| UI | `api.ts` diperluas, `dates.ts`, layout dengan navigasi, layar `/transactions` (form, filter, daftar berhalaman) |
+
+### Aturan
+
+- **Tanda**: pengeluaran disimpan negatif, pemasukan positif; UI dan command hanya mengirim besaran positif.
+- **Validasi di dalam satu transaksi `IMMEDIATE`**: rekening ada, belum diarsipkan, dan mata uangnya sama; kategori ada, belum diarsipkan, dan jenisnya cocok. Gagal berarti tidak ada yang tertulis.
+- **Ubah**: hanya income/expense. Rekening atau kategori yang diarsipkan boleh tetap melekat pada catatan lama, tetapi catatan tidak dapat dipindahkan ke yang diarsipkan. Transfer tidak diubah (hapus lalu buat ulang); tombol Ubah tidak tampil.
+- **Transfer**: `id = MAX(id)+1` dialokasikan dalam transaksi yang sama; kaki keluar menyebut dirinya sebagai grup; kedua kaki dihapus dengan satu `DELETE ... WHERE transfer_group_id = ?` dari kaki mana pun. Kekayaan bersih tidak berubah (diuji).
+- **Daftar**: urut `occurred_on DESC, id DESC`; paging keyset (`(occurred_on < ? OR (occurred_on = ? AND id < ?))`), satu baris ekstra menentukan ada-tidaknya halaman berikut; `limit` dijepit 1..=200 (bawaan 50).
+- **Filter**: rekening, kategori (induk mencakup sub-kategorinya), jenis (`income`/`expense`/`transfer` = kedua kaki), rentang tanggal inklusif, dan pencarian pada catatan atau nama kategori. `%`, `_`, dan `\` diperlakukan literal (`ESCAPE`); LIKE tidak peka huruf besar-kecil hanya untuk ASCII.
+- **Kategori**: maksimal satu tingkat, jenis anak = jenis induk, nama aktif unik per jenis dan induk.
+
+### Pengujian
+
+| Tingkat | Baru | Mencakup |
+|---|---|---|
+| core | 10 | tanda, jumlah > 0, catatan, transfer dua akun, kategori |
+| storage | 21 + 1 | tanda dan saldo, kecocokan jenis, arsip/mata uang/tak ditemukan, atomik, ubah, tak berpindah ke arsip, hapus, transfer dan kedua kaki, urutan dan tie-breaker, paging 137 baris tanpa duplikat, jepit limit, semua filter, pencarian literal, filter + cursor; **upgrade DB v1 → v2** |
+| app | 10 | DTO bertanda, kode galat stabil, ubah/hapus, transfer, paging via cursor DTO, filter, camelCase, kategori, arsip |
+| UI | 3 | tanggal lokal dan format |
+| E2E emulator | 14 | upgrade pada data nyata, buat pengeluaran/pemasukan/transfer lewat form, saldo, pencarian, filter, ubah, hapus dua sisi dengan konfirmasi, tolak rekening arsip, paging 120 baris |
+
+### Batasan yang diketahui
+
+- Daftar transfer menampilkan kedua kaki (satu per rekening) tanpa menggabungkannya; sistem desain di Fase 6 dapat menggabungkannya secara visual.
+- Kategori: belum ada ubah nama/arsip; nama bawaan berbahasa Indonesia.
+- Pencarian `LIKE '%x%'` memindai baris yang lolos filter lain; angka untuk 100 ribu baris diukur di Fase 8 (`EXPLAIN QUERY PLAN`).
+- Tidak ada batas jumlah baris yang dimuat UI selain tombol "Muat lebih banyak"; daftar tervirtualisasi menunggu Fase 6.
