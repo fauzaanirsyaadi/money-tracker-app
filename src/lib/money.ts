@@ -65,3 +65,25 @@ export function parseAmount(input: string, exponent: number): string | null {
   if (minor > 9007199254740991n) return null;
   return `${negative && minor !== 0n ? "-" : ""}${minor}`;
 }
+
+/**
+ * Live formatting for an amount field: keeps digits (and, when the currency has
+ * decimals, one decimal comma), groups the whole part with ".", and drops
+ * anything else. "1500000" -> "1.500.000"; "12,5" -> "12,5"; a typed "." is
+ * treated as grouping and ignored.
+ */
+export function formatAmountInput(raw: string, exponent: number): string {
+  // "," is the decimal separator; "." is the grouping this function itself
+  // emits, so it is ignored when the field is fed back its own output.
+  const text = raw;
+  const comma = text.indexOf(",");
+  const digits = (value: string) => value.replace(/\D/g, "");
+  // Whole-unit currencies have no decimal part: every separator is grouping.
+  const wholeSource = comma === -1 || exponent === 0 ? text : text.slice(0, comma);
+  let whole = digits(wholeSource).replace(/^0+(?=\d)/, "");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, GROUP);
+  if (comma === -1 || exponent === 0) return grouped;
+  const fraction = digits(text.slice(comma + 1)).slice(0, exponent);
+  whole = grouped === "" ? "0" : grouped;
+  return `${whole}${DECIMAL}${fraction}`;
+}

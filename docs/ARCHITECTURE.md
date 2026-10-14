@@ -720,3 +720,62 @@ Layar **Laporan**: kekayaan bersih dan rincian rekening; pengeluaran per kategor
 | 4 Laporan | Selesai (§20) |
 
 Ruang lingkup v1 yang belum ada: kunci aplikasi (PIN/biometrik), `FLAG_SECURE`, backup dan restore terenkripsi (semuanya Fase 7), serta sistem desain dan input 2 ketukan (Fase 6).
+
+---
+
+## 22. Fase 6: UI dan sistem desain (2026-10-14)
+
+Gaya: netral dan bersih, huruf sistem (tanpa aset jarak jauh), tanpa efek yang mahal bagi GPU. Seluruh teks antarmuka berbahasa Indonesia.
+
+### Token dan komponen
+
+| Hal | Isi |
+|---|---|
+| Token (`src/app.css`) | Warna terang dan gelap sebagai variabel CSS; gelap mengikuti OS atau pilihan pengguna (`data-theme`); skala tipografi 12–36 px; skala jarak 4 px; radius; target sentuh 48 px; kontras teks ≥ 4,5:1 |
+| Tema | Otomatis → Terang → Gelap (tombol di bilah atas), disimpan di `localStorage` dengan `try/catch` |
+| Komponen (`src/lib/components`) | `Button`, `Field`, `Segmented`, `Sheet`, `ProgressBar`, `Amount`, `Card`, `EmptyState`, `PageHeader`, `Icon` (SVG sebaris), `VirtualList`, `QuickAdd` |
+| Navigasi | Tab bawah di ponsel; rel samping ≥ 720 px; tombol **+** global di semua layar |
+| Layar | Rekening, Transaksi, Anggaran, Berulang, Laporan ditulis ulang; semua formulir berada di dalam lembar (bottom sheet) |
+
+### Catat transaksi: dua ketukan
+
+Definisi yang diukur: **ketukan 1** = tombol **+** (lembar terbuka, kolom jumlah sudah fokus, papan angka tampil), mengetik digit = masukan keyboard, **ketukan 2** = **Simpan**. Rekening dan kategori terisi dari pemakaian terakhir (`localStorage`), tanggal hari ini.
+
+Diukur dengan ketukan `adb` sungguhan di emulator: `+` → `25000` → `Simpan` menyimpan pengeluaran `-25.000` kategori Makanan, rekening Dompet, lembar menutup, dan banner "Transaksi tersimpan." muncul. Mengganti kategori atau rekening menambah satu ketukan.
+
+### Daftar tervirtualisasi
+
+`VirtualList` merender hanya baris yang terlihat (tinggi baris tetap dalam `rem`, jadi mengikuti ukuran huruf pengguna). Pada 133 transaksi, DOM berisi **16 baris** sementara tinggi daftar 9.576 px; memuat halaman berikut dipicu mendekati ujung. Logika jendela (`visibleRange`, `nearEnd`) murni dan diuji; pengujian menemukan bug rentang terbalik saat daftar menyusut di bawah posisi gulir (diperbaiki dengan menjepit posisi gulir).
+
+### Tata letak adaptif
+
+Ponsel: tab bawah, satu kolom. ≥ 720 px: rel samping, lembar menjadi dialog tengah. ≥ 960 px: laporan dua kolom, lebar konten 62 rem. Diverifikasi lewat emulasi ukuran 1100×800.
+
+### Ukuran bundel web (dilaporkan, dengan anggaran di CI)
+
+| | Mentah | gzip |
+|---|---|---|
+| JS (21 berkas) | 138,5 KB | **55,9 KB** |
+| CSS (11 berkas) | 18,5 KB | 6,3 KB |
+| Total | 160,3 KB | 64,4 KB |
+
+`scripts/bundle_size.py --max-js-gzip-kb=120` berjalan di CI (job `desktop`).
+
+### Temuan selama verifikasi
+
+| Temuan | Tindakan |
+|---|---|
+| Konten tergambar di bawah status bar dan bilah gestur (edge-to-edge) | `MainActivity` memasang listener inset native (bilah sistem, cutout, keyboard). Tidak bergantung pada dukungan CSS `env()` |
+| Dengan keyboard terbuka, tombol **Simpan** berada di luar layar (viewport 530 px, tombol di 534–582 px) | Lembar punya footer yang disematkan di luar area gulir; semua formulir lembar memakainya |
+| `backdrop-filter: blur()` pada bilah atas | Dibuang demi warna solid (mahal pada GPU rendah) |
+| `adb input text` menghasilkan ANR berulang di emulator | Akar masalah: AVD dikonfigurasi `hw.gpu.enabled=no` (render perangkat lunak). Diubah ke `hw.gpu.mode=host`; ANR hilang. Jejak ANR sebelumnya menunjukkan thread utama menunggu `ThreadedRenderer.syncAndDrawFrame`, dan ANR di `system_server` sendiri. **Bukan loop di kode aplikasi**, tetapi penghapusan efek mahal tetap berguna untuk HP kelas bawah |
+| Back menutup aplikasi saat lembar dibuka dengan klik JS | Artefak uji: entri riwayat tanpa gestur pengguna dilewati Chromium. Dengan ketukan nyata: Back pertama menyembunyikan keyboard (perilaku Android), Back kedua menutup lembar dan tetap di halaman |
+| Pemformat kolom jumlah menelan digit | `.` diperlakukan sebagai pengelompokan dan `,` sebagai desimal; mata uang tanpa desimal mengabaikan semua pemisah. Diuji termasuk "umpan balik" keluarannya sendiri |
+
+### Yang belum dilakukan / batasan
+
+- Verifikasi hanya di emulator; belum di HP kelas bawah (Fase 8 untuk angka).
+- Warna ikon status bar mengikuti tema sistem, bukan pilihan tema aplikasi.
+- Skrip E2E sebelumnya (DOM lama) tidak lagi relevan; alur diverifikasi dengan ketukan nyata dan pemeriksaan DOM baru, belum ada suite E2E otomatis yang disimpan di repo.
+- Tidak ada animasi transisi antar-layar; lembar hanya menaik halus (dihormati `prefers-reduced-motion`).
+- Salin anggaran dari bulan lalu dan urutan manual rekening belum ada.

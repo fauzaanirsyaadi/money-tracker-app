@@ -9,8 +9,15 @@
     type Trend,
   } from "$lib/api";
   import { formatShare, maxOf, percentOf } from "$lib/charts";
+  import Amount from "$lib/components/Amount.svelte";
+  import Card from "$lib/components/Card.svelte";
+  import EmptyState from "$lib/components/EmptyState.svelte";
+  import Icon from "$lib/components/Icon.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
+  import ProgressBar from "$lib/components/ProgressBar.svelte";
   import { formatMonth, isoMonth, shiftMonth } from "$lib/dates";
   import { formatMinor } from "$lib/money";
+  import { ui } from "$lib/session.svelte";
 
   const TREND_MONTHS = 6;
 
@@ -35,7 +42,6 @@
 
   async function loadSpending() {
     try {
-      // `YYYY-MM-31` is not always a date; the backend takes the real bounds.
       const [year, mon] = month.split("-").map(Number);
       const last = new Date(year ?? 1970, mon ?? 1, 0).getDate();
       spending = await api.spending(`${month}-01`, `${month}-${String(last).padStart(2, "0")}`);
@@ -43,6 +49,21 @@
     } catch (err) {
       show(err);
     }
+  }
+
+  async function loadAll() {
+    try {
+      const current = isoMonth();
+      [trend, worth] = await Promise.all([
+        api.trend(shiftMonth(current, -(TREND_MONTHS - 1)), current),
+        api.netWorth(),
+      ]);
+      error = "";
+    } catch (err) {
+      show(err);
+    }
+    await loadSpending();
+    loading = false;
   }
 
   async function go(delta: number) {
@@ -57,86 +78,82 @@
     expanded = next;
   }
 
-  onMount(async () => {
-    try {
-      const current = isoMonth();
-      [trend, worth] = await Promise.all([
-        api.trend(shiftMonth(current, -(TREND_MONTHS - 1)), current),
-        api.netWorth(),
-      ]);
-      error = "";
-    } catch (err) {
-      show(err);
-    }
-    await loadSpending();
-    loading = false;
+  onMount(loadAll);
+
+  $effect(() => {
+    if (ui.version > 0) void loadAll();
   });
 </script>
 
-<main>
-  <h1>Laporan</h1>
+<PageHeader title="Laporan" />
 
-  {#if error}
-    <p class="error" role="alert">{error}</p>
-  {/if}
+{#if error}
+  <p class="error" role="alert">{error}</p>
+{/if}
 
-  {#if loading}
-    <p>Memuat…</p>
-  {:else}
+{#if loading}
+  <p class="muted">Memuat…</p>
+{:else}
+  <div class="grid">
     {#if worth}
-      <section aria-label="Kekayaan bersih">
+      <Card>
         <h2>Kekayaan bersih</h2>
-        <p class="big" class:negative={worth.totalMinor.startsWith("-")}>
-          {worth.currency} {formatMinor(worth.totalMinor, worth.exponent)}
+        <p class="hero">
+          <Amount minor={worth.totalMinor} exponent={worth.exponent} currency={worth.currency} strong />
         </p>
-        <ul class="plain">
+        <ul class="plain" aria-label="Saldo per rekening">
           {#each worth.accounts as account (account.id)}
             <li class:archived={account.archived}>
               <span>{account.name}{account.archived ? " (diarsipkan)" : ""}</span>
-              <span class="num" class:negative={account.balanceMinor.startsWith("-")}>
-                {formatMinor(account.balanceMinor, account.exponent)}
-              </span>
+              <Amount minor={account.balanceMinor} exponent={account.exponent} />
             </li>
           {/each}
         </ul>
-      </section>
+      </Card>
     {/if}
 
-    <section aria-label="Pengeluaran per kategori">
+    <Card>
       <h2>Pengeluaran per kategori</h2>
       <div class="month" role="group" aria-label="Bulan">
-        <button type="button" onclick={() => go(-1)} aria-label="Bulan sebelumnya">‹</button>
+        <button type="button" onclick={() => go(-1)} aria-label="Bulan sebelumnya">
+          <Icon name="chevron-left" />
+        </button>
         <strong>{formatMonth(month)}</strong>
-        <button type="button" onclick={() => go(1)} aria-label="Bulan berikutnya">›</button>
+        <button type="button" onclick={() => go(1)} aria-label="Bulan berikutnya">
+          <Icon name="chevron-right" />
+        </button>
       </div>
 
       {#if spending && spending.categories.length > 0}
-        <p class="total">
-          Total: <strong>{formatMinor(spending.totalMinor, spending.exponent)}</strong>
+        <p class="total muted">
+          Total <Amount minor={spending.totalMinor} exponent={spending.exponent} neutral strong />
         </p>
-        <ul class="plain">
+        <ul class="plain cats" aria-label="Pengeluaran per kategori">
           {#each spending.categories as category (category.categoryId)}
             <li>
               <button
                 type="button"
-                class="row"
-                aria-expanded={category.children.length > 0 ? expanded.has(category.categoryId) : undefined}
+                class="cat"
+                aria-expanded={category.children.length > 0
+                  ? expanded.has(category.categoryId)
+                  : undefined}
                 onclick={() => category.children.length > 0 && toggle(category.categoryId)}
               >
-                <span class="head">
+                <span class="top">
                   <strong>{category.name}</strong>
                   <span class="num">{formatMinor(category.spentMinor, spending.exponent)}</span>
                 </span>
-                <span
-                  class="bar"
-                  role="img"
-                  aria-label={`${formatShare(category.shareBp)} dari total`}
-                >
-                  <span style:width={`${percentOf(category.spentMinor, spending.totalMinor)}%`}></span>
-                </span>
+                <ProgressBar
+                  percent={percentOf(category.spentMinor, spending.totalMinor)}
+                  label={`${category.name} ${formatShare(category.shareBp)}`}
+                />
                 <span class="sub">
-                  {formatShare(category.shareBp)} · {category.count} transaksi
-                  {#if category.children.length > 0}· {expanded.has(category.categoryId) ? "sembunyikan" : "rincian"}{/if}
+                  {formatShare(category.shareBp)} · {category.count} transaksi{category.children
+                    .length > 0
+                    ? expanded.has(category.categoryId)
+                      ? " · sembunyikan"
+                      : " · rincian"
+                    : ""}
                 </span>
               </button>
               {#if expanded.has(category.categoryId)}
@@ -153,32 +170,34 @@
           {/each}
         </ul>
       {:else}
-        <p>Tidak ada pengeluaran pada bulan ini.</p>
+        <EmptyState title="Tidak ada pengeluaran" text="Belum ada pengeluaran pada bulan ini." />
       {/if}
-    </section>
+    </Card>
 
     {#if trend}
-      <section aria-label="Tren bulanan">
+      <Card>
         <h2>Tren {TREND_MONTHS} bulan</h2>
         <p class="legend">
-          <span class="swatch income"></span> Pemasukan
-          <span class="swatch expense"></span> Pengeluaran
+          <span class="dot income"></span> Pemasukan
+          <span class="dot expense"></span> Pengeluaran
         </p>
-        <ul class="plain">
+        <ul class="plain trend" aria-label="Tren bulanan">
           {#each trend.months as m (m.month)}
-            <li class="trend">
-              <div class="head">
+            <li>
+              <span class="top">
                 <strong>{formatMonth(m.month)}</strong>
-                <span class="num" class:negative={m.netMinor.startsWith("-")}>
-                  {m.netMinor.startsWith("-") ? "" : "+"}{formatMinor(m.netMinor, trend.exponent)}
-                </span>
-              </div>
-              <span class="bar income" role="img" aria-label={`Pemasukan ${formatMinor(m.incomeMinor, trend.exponent)}`}>
-                <span style:width={`${percentOf(m.incomeMinor, trendMax)}%`}></span>
+                <Amount minor={m.netMinor} exponent={trend.exponent} plus />
               </span>
-              <span class="bar expense" role="img" aria-label={`Pengeluaran ${formatMinor(m.expenseMinor, trend.exponent)}`}>
-                <span style:width={`${percentOf(m.expenseMinor, trendMax)}%`}></span>
-              </span>
+              <ProgressBar
+                percent={percentOf(m.incomeMinor, trendMax)}
+                tone="income"
+                label={`Pemasukan ${formatMonth(m.month)}`}
+              />
+              <ProgressBar
+                percent={percentOf(m.expenseMinor, trendMax)}
+                tone="expense"
+                label={`Pengeluaran ${formatMonth(m.month)}`}
+              />
               <span class="sub">
                 Masuk {formatMinor(m.incomeMinor, trend.exponent)} · Keluar
                 {formatMinor(m.expenseMinor, trend.exponent)} · Kekayaan
@@ -187,19 +206,38 @@
             </li>
           {/each}
         </ul>
-      </section>
+      </Card>
     {/if}
-  {/if}
-</main>
+  </div>
+{/if}
 
 <style>
-  main {
-    max-width: 36rem;
-    margin: 0 auto;
-    padding: 1rem;
+  .grid {
+    display: grid;
+    gap: var(--space-4);
   }
-  section {
-    margin-bottom: 2rem;
+  @media (min-width: 960px) {
+    .grid {
+      grid-template-columns: 1fr 1fr;
+      align-items: start;
+    }
+    .grid > :global(:last-child) {
+      grid-column: 1 / -1;
+    }
+  }
+  h2 {
+    margin-bottom: var(--space-3);
+  }
+  .muted,
+  .sub {
+    color: var(--text-muted);
+  }
+  .sub {
+    font-size: var(--fs-sm);
+  }
+  .hero {
+    font-size: var(--fs-2xl);
+    margin: 0 0 var(--space-3);
   }
   .plain,
   .children {
@@ -208,36 +246,19 @@
     margin: 0;
   }
   .plain > li {
-    padding: 0.5rem 0;
-    border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
     display: flex;
     justify-content: space-between;
-    gap: 1rem;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    border-top: 1px solid var(--border);
   }
-  .plain > li:has(.row),
-  .plain > li.trend {
+  .plain.cats > li,
+  .plain.trend > li {
     display: block;
   }
-  .children {
-    padding-left: 1rem;
-  }
-  .children li {
-    display: flex;
-    justify-content: space-between;
-    padding: 0.25rem 0;
-    opacity: 0.85;
-  }
-  .big {
-    font-size: 1.75rem;
-    font-weight: 600;
-    margin: 0.25rem 0 0.75rem;
-    font-variant-numeric: tabular-nums;
-  }
-  .num {
-    font-variant-numeric: tabular-nums;
-  }
-  .negative {
-    color: #b3261e;
+  .trend > li {
+    display: grid;
+    gap: var(--space-2);
   }
   .archived {
     opacity: 0.6;
@@ -246,77 +267,69 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 0.5rem;
+    margin-bottom: var(--space-2);
+  }
+  .month button {
+    display: grid;
+    place-items: center;
+    width: var(--tap);
+    height: var(--tap);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
   }
   .total {
     text-align: right;
-    margin: 0.25rem 0;
+    margin-bottom: var(--space-2);
   }
-  .row {
+  .cat {
     all: unset;
+    box-sizing: border-box;
     display: grid;
-    gap: 0.3rem;
+    gap: var(--space-2);
     width: 100%;
+    min-height: var(--tap);
     cursor: pointer;
-    min-height: 2.75rem;
   }
-  .head {
+  .top {
     display: flex;
     justify-content: space-between;
-    gap: 1rem;
+    gap: var(--space-3);
   }
-  .sub {
-    font-size: 0.85em;
-    opacity: 0.75;
+  .children {
+    padding-left: var(--space-4);
   }
-  .bar {
-    display: block;
-    height: 0.6rem;
-    border-radius: 0.3rem;
-    background: color-mix(in srgb, currentColor 12%, transparent);
-    overflow: hidden;
-  }
-  .bar > span {
-    display: block;
-    height: 100%;
-    background: #3949ab;
-  }
-  .bar.income > span {
-    background: #2e7d32;
-  }
-  .bar.expense > span {
-    background: #b3261e;
-  }
-  .trend {
-    display: grid !important;
-    gap: 0.3rem;
+  .children li {
+    display: flex;
+    justify-content: space-between;
+    padding: var(--space-1) 0;
+    color: var(--text-muted);
   }
   .legend {
     display: flex;
-    gap: 0.75rem;
+    gap: var(--space-3);
     align-items: center;
-    font-size: 0.9em;
+    font-size: var(--fs-sm);
+    color: var(--text-muted);
+    margin-bottom: var(--space-2);
   }
-  .swatch {
+  .dot {
     display: inline-block;
     width: 0.75rem;
     height: 0.75rem;
     border-radius: 0.2rem;
   }
-  .swatch.income {
-    background: #2e7d32;
+  .dot.income {
+    background: var(--income);
   }
-  .swatch.expense {
-    background: #b3261e;
+  .dot.expense {
+    background: var(--expense);
   }
   .error {
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    background: color-mix(in srgb, #b3261e 15%, transparent);
-  }
-  button {
-    font: inherit;
-    padding: 0.5rem 0.75rem;
-    min-height: 2.75rem;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--danger-bg);
+    color: var(--expense);
+    margin-bottom: var(--space-3);
   }
 </style>

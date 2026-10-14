@@ -1,29 +1,56 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
+  import "../app.css";
+
   import { page } from "$app/state";
   import { ApiError, recurring } from "$lib/api";
+  import Icon from "$lib/components/Icon.svelte";
+  import QuickAdd from "$lib/components/QuickAdd.svelte";
   import { isoDate } from "$lib/dates";
+  import { loadTheme, nextTheme, saveTheme, type ThemePref } from "$lib/prefs";
+  import { dataChanged, notify, openQuickAdd, ui } from "$lib/session.svelte";
 
   let { children } = $props();
 
-  const links = [
-    { href: "/", label: "Rekening" },
-    { href: "/transactions", label: "Transaksi" },
-    { href: "/budgets", label: "Anggaran" },
-    { href: "/recurring", label: "Berulang" },
-    { href: "/reports", label: "Laporan" },
-  ];
+  const tabs = [
+    { href: "/", label: "Rekening", icon: "wallet" },
+    { href: "/transactions", label: "Transaksi", icon: "list" },
+    { href: "/budgets", label: "Anggaran", icon: "target" },
+    { href: "/recurring", label: "Berulang", icon: "repeat" },
+    { href: "/reports", label: "Laporan", icon: "chart" },
+  ] as const;
 
-  let notice = $state("");
+  const THEME_LABEL: Record<ThemePref, string> = {
+    auto: "Otomatis",
+    light: "Terang",
+    dark: "Gelap",
+  };
+
+  let theme = $state<ThemePref>("auto");
+
+  function applyTheme(value: ThemePref) {
+    const root = document.documentElement;
+    if (value === "auto") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", value);
+  }
+
+  function cycleTheme() {
+    theme = nextTheme(theme);
+    saveTheme(theme);
+    applyTheme(theme);
+  }
 
   // Recurring transactions are computed when the app opens: no background
-  // service exists. Failures here must not block the app.
+  // service exists. A failure here must not block the app.
   onMount(async () => {
+    theme = loadTheme();
+    applyTheme(theme);
     try {
       const report = await recurring.catchUp(isoDate());
       if (report.transactionsCreated > 0) {
-        notice = `${report.transactionsCreated} transaksi berulang dicatat.`;
+        notify(`${report.transactionsCreated} transaksi berulang dicatat.`, 6000);
+        dataChanged();
       }
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
@@ -31,50 +58,177 @@
   });
 </script>
 
-<nav aria-label="Navigasi utama">
-  {#each links as link}
-    <a href={link.href} aria-current={page.url.pathname === link.href ? "page" : undefined}>
-      {link.label}
-    </a>
-  {/each}
-</nav>
+<div class="shell">
+  <header class="topbar">
+    <span class="brand">Money Tracker</span>
+    <button
+      type="button"
+      class="icon-btn"
+      onclick={cycleTheme}
+      aria-label={`Tema: ${THEME_LABEL[theme]}. Ketuk untuk mengganti.`}
+    >
+      <Icon name={theme === "auto" ? "auto" : theme === "light" ? "sun" : "moon"} />
+    </button>
+  </header>
 
-{#if notice}
-  <p class="notice" role="status">
-    {notice}
-    <button type="button" onclick={() => (notice = "")}>Tutup</button>
-  </p>
-{/if}
+  <nav class="tabs" aria-label="Navigasi utama">
+    {#each tabs as tab (tab.href)}
+      <a
+        href={tab.href}
+        aria-current={page.url.pathname === tab.href ? "page" : undefined}
+      >
+        <Icon name={tab.icon} size={22} />
+        <span>{tab.label}</span>
+      </a>
+    {/each}
+  </nav>
 
-{@render children()}
+  <div class="content">
+    {#if ui.notice}
+      <p class="notice" role="status">{ui.notice}</p>
+    {/if}
+    {@render children()}
+  </div>
+
+  <button
+    type="button"
+    class="fab"
+    onclick={() => openQuickAdd()}
+    aria-label="Catat transaksi"
+  >
+    <Icon name="plus" size={28} />
+  </button>
+</div>
+
+<QuickAdd />
 
 <style>
-  nav {
+  .shell {
+    min-height: 100dvh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-    padding: 0.5rem 1rem 0;
-    max-width: 36rem;
-    margin: 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-1) var(--space-4);
+    /* Solid, not translucent: backdrop-filter is costly on low-end GPUs. */
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    min-height: 3.25rem;
   }
-  a {
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    color: inherit;
+  .brand {
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .icon-btn {
+    display: grid;
+    place-items: center;
+    width: var(--tap);
+    height: var(--tap);
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+  }
+  .tabs {
+    position: fixed;
+    z-index: 6;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .tabs a {
+    display: grid;
+    justify-items: center;
+    align-content: center;
+    gap: 2px;
+    min-height: var(--nav-height);
+    padding: var(--space-1);
+    color: var(--text-muted);
     text-decoration: none;
-  }
-  a[aria-current="page"] {
+    font-size: var(--fs-xs);
     font-weight: 600;
-    background: color-mix(in srgb, currentColor 12%, transparent);
+  }
+  .tabs a[aria-current="page"] {
+    color: var(--primary);
+  }
+  .content {
+    width: 100%;
+    max-width: var(--content-max);
+    margin: 0 auto;
+    padding: var(--space-4) var(--space-4) calc(var(--nav-height) + 6rem);
   }
   .notice {
-    max-width: 36rem;
-    margin: 0.5rem auto 0;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    background: color-mix(in srgb, #2e7d32 15%, transparent);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    margin-bottom: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--success-bg);
+  }
+  .fab {
+    position: fixed;
+    z-index: 7;
+    right: var(--space-4);
+    bottom: calc(var(--nav-height) + var(--space-4) + env(safe-area-inset-bottom));
+    display: grid;
+    place-items: center;
+    width: 3.5rem;
+    height: 3.5rem;
+    border: 0;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--on-primary);
+    box-shadow: var(--shadow);
+  }
+
+  /* Wide screens: a side rail instead of the bottom bar. */
+  @media (min-width: 720px) {
+    .shell {
+      grid-template-columns: 13rem 1fr;
+      grid-template-rows: auto 1fr;
+    }
+    .topbar {
+      grid-column: 1 / -1;
+    }
+    .tabs {
+      position: sticky;
+      top: 3.25rem;
+      align-self: start;
+      grid-template-columns: 1fr;
+      height: calc(100dvh - 3.25rem);
+      border-top: 0;
+      border-right: 1px solid var(--border);
+      padding: var(--space-3);
+      gap: var(--space-1);
+      align-content: start;
+    }
+    .tabs a {
+      grid-auto-flow: column;
+      justify-content: start;
+      justify-items: start;
+      gap: var(--space-3);
+      min-height: var(--tap);
+      padding: 0 var(--space-3);
+      border-radius: var(--radius-md);
+      font-size: var(--fs-md);
+    }
+    .tabs a[aria-current="page"] {
+      background: var(--surface-2);
+    }
+    .content {
+      padding-bottom: 6rem;
+    }
+    .fab {
+      bottom: var(--space-5);
+      right: var(--space-5);
+    }
   }
 </style>

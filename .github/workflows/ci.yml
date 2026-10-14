@@ -43,6 +43,10 @@ jobs:
       - run: cargo test --workspace --locked
       - run: pnpm check
       - run: pnpm test
+      - name: Web bundle size budget
+        run: |
+          pnpm build
+          python3 scripts/bundle_size.py --max-js-gzip-kb=120
       - name: Offline guard (CSP, capabilities, network APIs)
         run: |
           python3 -m unittest discover -s scripts -p 'test_*.py'

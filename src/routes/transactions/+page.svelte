@@ -9,41 +9,30 @@
     type Account,
     type Category,
     type Cursor,
-    type FlowKind,
     type Transaction,
     type TransactionFilter,
   } from "$lib/api";
-  import { formatDate, isoDate } from "$lib/dates";
-  import { formatMinor, parseAmount } from "$lib/money";
+  import Amount from "$lib/components/Amount.svelte";
+  import Button from "$lib/components/Button.svelte";
+  import EmptyState from "$lib/components/EmptyState.svelte";
+  import Field from "$lib/components/Field.svelte";
+  import Icon from "$lib/components/Icon.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
+  import Sheet from "$lib/components/Sheet.svelte";
+  import VirtualList from "$lib/components/VirtualList.svelte";
+  import { formatDate } from "$lib/dates";
+  import { dataChanged, notify, openQuickAdd, ui } from "$lib/session.svelte";
 
-  type Mode = FlowKind | "transfer";
-
-  const MODE_LABEL: Record<Mode, string> = {
-    expense: "Pengeluaran",
-    income: "Pemasukan",
-    transfer: "Transfer",
-  };
-
-  const ERROR_TEXT: Record<string, string> = {
-    unavailable: "Penyimpanan tidak tersedia di perangkat ini.",
-    invalid_input: "Isian tidak valid.",
-    not_found: "Data tidak ditemukan.",
-    name_in_use: "Nama sudah dipakai.",
-    archived: "Rekening atau kategori sudah diarsipkan.",
-    currency_mismatch: "Mata uang tidak sesuai.",
-    amount_out_of_range: "Jumlah terlalu besar.",
-    internal: "Terjadi kesalahan.",
-  };
+  const PAGE = 50;
 
   let accountList = $state<Account[]>([]);
   let categoryList = $state<Category[]>([]);
   let items = $state<Transaction[]>([]);
   let next = $state<Cursor | null>(null);
   let loading = $state(true);
-  let loadingMore = $state(false);
+  let loadingMore = false;
   let error = $state("");
 
-  // filters
   let search = $state("");
   let filterAccount = $state("");
   let filterCategory = $state("");
@@ -51,30 +40,14 @@
   let filterFrom = $state("");
   let filterTo = $state("");
 
-  // form
-  let editingId = $state<number | null>(null);
-  let mode = $state<Mode>("expense");
-  let accountId = $state("");
-  let toAccountId = $state("");
-  let categoryId = $state("");
-  let amount = $state("");
-  let occurredOn = $state(isoDate());
-  let note = $state("");
+  let filterOpen = $state(false);
+  let detailOpen = $state(false);
+  let detailSheet = $state<{ close: () => void }>();
+  let transfer = $state<Transaction | null>(null);
 
-  // two-step delete: the id waiting for confirmation
-  let confirmingId = $state<number | null>(null);
-
-  const exponent = $derived(accountList[0]?.exponent ?? 0);
-  const formCategories = $derived(
-    mode === "transfer" ? [] : categoryList.filter((c) => c.kind === mode),
+  const activeFilters = $derived(
+    [filterAccount, filterCategory, filterKind, filterFrom, filterTo].filter(Boolean).length,
   );
-
-  function show(err: unknown) {
-    error =
-      err instanceof ApiError
-        ? (ERROR_TEXT[err.code] ?? ERROR_TEXT.internal)
-        : ERROR_TEXT.internal;
-  }
 
   function currentFilter(): TransactionFilter {
     const filter: TransactionFilter = {};
@@ -87,9 +60,16 @@
     return filter;
   }
 
+  function show(err: unknown) {
+    error =
+      err instanceof ApiError && err.code === "unavailable"
+        ? "Penyimpanan tidak tersedia di perangkat ini."
+        : "Terjadi kesalahan.";
+  }
+
   async function reload() {
     try {
-      const page = await api.list(currentFilter(), null);
+      const page = await api.list(currentFilter(), null, PAGE);
       items = page.items;
       next = page.next;
       error = "";
@@ -104,7 +84,7 @@
     if (!next || loadingMore) return;
     loadingMore = true;
     try {
-      const page = await api.list(currentFilter(), next);
+      const page = await api.list(currentFilter(), next, PAGE);
       items = [...items, ...page.items];
       next = page.next;
     } catch (err) {
@@ -120,71 +100,9 @@
     searchTimer = setTimeout(reload, 300);
   }
 
-  function resetForm() {
-    editingId = null;
-    mode = "expense";
-    toAccountId = "";
-    categoryId = "";
-    amount = "";
-    note = "";
-    occurredOn = isoDate();
-  }
-
-  function startEdit(t: Transaction) {
-    if (t.kind === "transfer_out" || t.kind === "transfer_in") return;
-    editingId = t.id;
-    mode = t.kind;
-    accountId = String(t.accountId);
-    categoryId = t.categoryId === null ? "" : String(t.categoryId);
-    amount = formatMinor(t.amountMinor.replace("-", ""), t.exponent);
-    occurredOn = t.occurredOn;
-    note = t.note;
-    error = "";
-  }
-
-  async function submit(event: SubmitEvent) {
-    event.preventDefault();
-    const minor = parseAmount(amount, exponent);
-    if (minor === null || minor.startsWith("-") || minor === "0") {
-      error = "Jumlah harus lebih dari nol. Contoh: 25.000";
-      return;
-    }
-    try {
-      if (mode === "transfer") {
-        await api.transfer({
-          fromAccountId: Number(accountId),
-          toAccountId: Number(toAccountId),
-          amountMinor: minor,
-          note,
-          occurredOn,
-        });
-      } else {
-        const input = {
-          accountId: Number(accountId),
-          categoryId: Number(categoryId),
-          kind: mode,
-          amountMinor: minor,
-          note,
-          occurredOn,
-        };
-        if (editingId === null) await api.create(input);
-        else await api.update(editingId, input);
-      }
-      resetForm();
-      await reload();
-    } catch (err) {
-      show(err);
-    }
-  }
-
-  async function remove(t: Transaction) {
-    try {
-      await api.remove(t.id);
-      confirmingId = null;
-      await reload();
-    } catch (err) {
-      show(err);
-    }
+  function clearFilters() {
+    filterAccount = filterCategory = filterKind = filterFrom = filterTo = "";
+    void reload();
   }
 
   function describe(t: Transaction): string {
@@ -193,263 +111,261 @@
     return t.categoryName ?? "";
   }
 
-  onMount(async () => {
+  function open(t: Transaction) {
+    if (t.kind === "income" || t.kind === "expense") {
+      openQuickAdd(t);
+    } else {
+      transfer = t;
+      detailOpen = true;
+    }
+  }
+
+  async function removeTransfer() {
+    if (!transfer) return;
     try {
-      [accountList, categoryList] = await Promise.all([
-        accountsApi.list(false),
-        categoriesApi.list(false),
-      ]);
-      accountId = accountList[0] ? String(accountList[0].id) : "";
+      await api.remove(transfer.id);
+      detailSheet?.close();
+      notify("Transfer dihapus (kedua sisi).");
+      dataChanged();
     } catch (err) {
       show(err);
     }
-    await reload();
+  }
+
+  onMount(async () => {
+    try {
+      [accountList, categoryList] = await Promise.all([
+        accountsApi.list(true),
+        categoriesApi.list(true),
+      ]);
+    } catch (err) {
+      show(err);
+    }
+  });
+
+  $effect(() => {
+    void ui.version;
+    void reload();
   });
 </script>
 
-<main>
-  <h1>Transaksi</h1>
+<PageHeader title="Transaksi" />
 
-  {#if error}
-    <p class="error" role="alert">{error}</p>
-  {/if}
+<div class="tools">
+  <label class="search">
+    <span class="visually-hidden">Cari catatan atau kategori</span>
+    <Icon name="search" size={20} />
+    <input
+      type="search"
+      placeholder="Cari catatan atau kategori"
+      bind:value={search}
+      oninput={searchChanged}
+    />
+  </label>
+  <button type="button" class="filter-btn" onclick={() => (filterOpen = true)} aria-label="Filter">
+    <Icon name="filter" />
+    {#if activeFilters > 0}<span class="badge">{activeFilters}</span>{/if}
+  </button>
+</div>
 
-  <form onsubmit={submit} aria-label="Form transaksi">
-    <h2>{editingId === null ? "Catat transaksi" : "Ubah transaksi"}</h2>
+{#if error}
+  <p class="error" role="alert">{error}</p>
+{/if}
 
-    <div class="modes" role="radiogroup" aria-label="Jenis">
-      {#each Object.entries(MODE_LABEL) as [value, label]}
-        <button
-          type="button"
-          role="radio"
-          aria-checked={mode === value}
-          disabled={editingId !== null && value === "transfer"}
-          onclick={() => {
-            mode = value as Mode;
-            categoryId = "";
-          }}>{label}</button
-        >
-      {/each}
-    </div>
-
-    <label>
-      {mode === "transfer" ? "Dari rekening" : "Rekening"}
-      <select bind:value={accountId} required>
-        {#each accountList as account (account.id)}
-          <option value={String(account.id)}>{account.name}</option>
-        {/each}
-      </select>
-    </label>
-
-    {#if mode === "transfer"}
-      <label>
-        Ke rekening
-        <select bind:value={toAccountId} required>
-          <option value="" disabled>Pilih rekening</option>
-          {#each accountList.filter((a) => String(a.id) !== accountId) as account (account.id)}
-            <option value={String(account.id)}>{account.name}</option>
-          {/each}
-        </select>
-      </label>
-    {:else}
-      <label>
-        Kategori
-        <select bind:value={categoryId} required>
-          <option value="" disabled>Pilih kategori</option>
-          {#each formCategories as category (category.id)}
-            <option value={String(category.id)}>
-              {category.parentId === null ? "" : "— "}{category.name}
-            </option>
-          {/each}
-        </select>
-      </label>
+{#if loading}
+  <p class="muted">Memuat…</p>
+{:else if items.length === 0}
+  <EmptyState
+    title={activeFilters > 0 || search ? "Tidak ada yang cocok" : "Belum ada transaksi"}
+    text={activeFilters > 0 || search
+      ? "Ubah pencarian atau filter."
+      : "Ketuk tombol + untuk mencatat transaksi pertama."}
+  />
+{:else}
+  <div class="list">
+    <VirtualList
+      {items}
+      label="Daftar transaksi"
+      key={(t: Transaction) => t.id}
+      onEnd={more}
+    >
+      {#snippet row(t: Transaction)}
+        <button type="button" class="tx" onclick={() => open(t)}>
+          <span class="meta">
+            <strong>{describe(t)}</strong>
+            <small>
+              {formatDate(t.occurredOn)} · {t.accountName}{t.note ? ` · ${t.note}` : ""}{t.recurring ? " · berulang" : ""}
+            </small>
+          </span>
+          <Amount minor={t.amountMinor} exponent={t.exponent} plus strong />
+        </button>
+      {/snippet}
+    </VirtualList>
+    {#if next}
+      <p class="muted more" aria-live="polite">Memuat lebih banyak…</p>
     {/if}
+  </div>
+{/if}
 
-    <label>
-      Jumlah
-      <input bind:value={amount} inputmode="decimal" autocomplete="off" required />
-    </label>
-    <label>
-      Tanggal
-      <input type="date" bind:value={occurredOn} required />
-    </label>
-    <label>
-      Catatan
-      <input bind:value={note} maxlength="500" autocomplete="off" />
-    </label>
-
-    <div class="actions">
-      <button type="submit">{editingId === null ? "Simpan" : "Perbarui"}</button>
-      {#if editingId !== null}
-        <button type="button" onclick={resetForm}>Batal</button>
-      {/if}
-    </div>
-  </form>
-
-  <section aria-label="Filter">
-    <h2>Riwayat</h2>
-    <div class="filters">
-      <input
-        type="search"
-        placeholder="Cari catatan atau kategori"
-        bind:value={search}
-        oninput={searchChanged}
-        aria-label="Cari"
-      />
-      <select bind:value={filterAccount} onchange={reload} aria-label="Rekening">
+<Sheet bind:open={filterOpen} title="Filter">
+  <div class="form">
+    <Field label="Rekening">
+      <select bind:value={filterAccount} onchange={reload}>
         <option value="">Semua rekening</option>
         {#each accountList as account (account.id)}
           <option value={String(account.id)}>{account.name}</option>
         {/each}
       </select>
-      <select bind:value={filterKind} onchange={reload} aria-label="Jenis">
+    </Field>
+    <Field label="Jenis">
+      <select bind:value={filterKind} onchange={reload}>
         <option value="">Semua jenis</option>
         <option value="expense">Pengeluaran</option>
         <option value="income">Pemasukan</option>
         <option value="transfer">Transfer</option>
       </select>
-      <select bind:value={filterCategory} onchange={reload} aria-label="Kategori">
+    </Field>
+    <Field label="Kategori">
+      <select bind:value={filterCategory} onchange={reload}>
         <option value="">Semua kategori</option>
         {#each categoryList as category (category.id)}
           <option value={String(category.id)}>
-            {category.parentId === null ? "" : "— "}{category.name}
+            {category.parentId === null ? "" : "↳ "}{category.name}
           </option>
         {/each}
       </select>
-      <label>
-        Dari
+    </Field>
+    <div class="dates">
+      <Field label="Dari">
         <input type="date" bind:value={filterFrom} onchange={reload} />
-      </label>
-      <label>
-        Sampai
+      </Field>
+      <Field label="Sampai">
         <input type="date" bind:value={filterTo} onchange={reload} />
-      </label>
+      </Field>
     </div>
-  </section>
+    <Button variant="ghost" onclick={clearFilters}>Hapus semua filter</Button>
+  </div>
+</Sheet>
 
-  <section aria-label="Daftar transaksi">
-    {#if loading}
-      <p>Memuat…</p>
-    {:else if items.length === 0}
-      <p>Belum ada transaksi yang cocok.</p>
-    {:else}
-      <ul>
-        {#each items as t (t.id)}
-          <li>
-            <div class="main">
-              <strong>{describe(t)}</strong>
-              <small>
-                {formatDate(t.occurredOn)} · {t.accountName}{t.note ? ` · ${t.note}` : ""}
-              </small>
-            </div>
-            <span class="amount" class:negative={t.amountMinor.startsWith("-")}>
-              {formatMinor(t.amountMinor, t.exponent)}
-            </span>
-            <div class="actions">
-              {#if t.kind === "income" || t.kind === "expense"}
-                <button type="button" onclick={() => startEdit(t)}>Ubah</button>
-              {/if}
-              {#if confirmingId === t.id}
-                <button type="button" class="danger" onclick={() => remove(t)}>
-                  Ya, hapus{t.transferGroupId !== null ? " kedua sisi" : ""}
-                </button>
-                <button type="button" onclick={() => (confirmingId = null)}>Batal</button>
-              {:else}
-                <button type="button" onclick={() => (confirmingId = t.id)}>Hapus</button>
-              {/if}
-            </div>
-          </li>
-        {/each}
-      </ul>
-      {#if next}
-        <button type="button" class="more" onclick={more} disabled={loadingMore}>
-          {loadingMore ? "Memuat…" : "Muat lebih banyak"}
-        </button>
-      {/if}
-    {/if}
-  </section>
-</main>
+<Sheet bind:this={detailSheet} bind:open={detailOpen} title="Transfer">
+  {#if transfer}
+    <div class="form">
+      <p>
+        <strong>{describe(transfer)}</strong> · {formatDate(transfer.occurredOn)} ·
+        {transfer.accountName}
+      </p>
+      <p><Amount minor={transfer.amountMinor} exponent={transfer.exponent} plus strong /></p>
+      {#if transfer.note}<p class="muted">{transfer.note}</p>{/if}
+      <p class="muted">
+        Transfer tidak dapat diubah. Hapus lalu buat ulang bila ada yang salah; kedua sisinya
+        terhapus bersama.
+      </p>
+      <Button variant="danger" block onclick={removeTransfer}>Hapus transfer</Button>
+    </div>
+  {/if}
+</Sheet>
 
 <style>
-  main {
-    max-width: 36rem;
-    margin: 0 auto;
-    padding: 1rem;
-  }
-  form,
-  .filters {
-    display: grid;
-    gap: 0.75rem;
-  }
-  .filters {
-    grid-template-columns: 1fr 1fr;
-  }
-  .filters input[type="search"] {
-    grid-column: 1 / -1;
-  }
-  label {
-    display: grid;
-    gap: 0.25rem;
-  }
-  .modes {
+  .tools {
     display: flex;
-    gap: 0.5rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
   }
-  .modes button {
+  .search {
     flex: 1;
-  }
-  .modes button[aria-checked="true"] {
-    font-weight: 600;
-    outline: 2px solid currentColor;
-  }
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  li {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 0.25rem 1rem;
-    padding: 0.75rem 0;
-    border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  }
-  small {
-    display: block;
-    opacity: 0.7;
-  }
-  .amount {
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-  }
-  .negative {
-    color: #b3261e;
-  }
-  .actions {
-    grid-column: 1 / -1;
     display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-3);
+    min-height: var(--tap);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
   }
-  .danger {
-    color: #b3261e;
+  .search input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    outline: none;
+  }
+  .filter-btn {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: var(--tap);
+    min-height: var(--tap);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .badge {
+    position: absolute;
+    top: -0.35rem;
+    right: -0.35rem;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    display: grid;
+    place-items: center;
+    padding: 0 0.25rem;
+    border-radius: 999px;
+    background: var(--primary);
+    color: var(--on-primary);
+    font-size: var(--fs-xs);
+    font-weight: 700;
+  }
+  .list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .tx {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+    height: 100%;
+    padding: 0 var(--space-4);
+    border: 0;
+    background: transparent;
+    text-align: left;
+  }
+  .meta {
+    display: grid;
+    min-width: 0;
+  }
+  .meta strong,
+  .meta small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  small,
+  .muted {
+    color: var(--text-muted);
   }
   .more {
-    width: 100%;
-    margin-top: 1rem;
+    padding: var(--space-3);
+    text-align: center;
+  }
+  .form {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .dates {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-3);
   }
   .error {
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    background: color-mix(in srgb, #b3261e 15%, transparent);
-  }
-  input,
-  select,
-  button {
-    font: inherit;
-    padding: 0.5rem 0.75rem;
-  }
-  button {
-    min-height: 2.75rem;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--danger-bg);
+    color: var(--expense);
+    margin-bottom: var(--space-3);
   }
 </style>

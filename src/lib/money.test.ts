@@ -54,3 +54,25 @@ test("enforces the shared range and never returns negative zero", () => {
   assert.equal(parseAmount("9007199254740992", 0), null);
   assert.equal(parseAmount("-0", 0), "0");
 });
+
+import { formatAmountInput } from "./money.ts";
+
+test("amount fields group digits as you type", () => {
+  assert.equal(formatAmountInput("", 0), "");
+  assert.equal(formatAmountInput("5", 0), "5");
+  assert.equal(formatAmountInput("1500000", 0), "1.500.000");
+  assert.equal(formatAmountInput("1.500.0000", 0), "15.000.000");
+  assert.equal(formatAmountInput("007", 0), "7");
+  assert.equal(formatAmountInput("12abc3", 0), "123");
+});
+
+test("amount fields keep a decimal part only when the currency has one", () => {
+  assert.equal(formatAmountInput("12,5", 2), "12,5");
+  assert.equal(formatAmountInput("12,567", 2), "12,56");
+  assert.equal(formatAmountInput(",5", 2), "0,5");
+  assert.equal(formatAmountInput("1234,5", 2), "1.234,5");
+  assert.equal(formatAmountInput("12,5", 0), "125");
+  // Feeding the field its own output while typing must be stable.
+  assert.equal(formatAmountInput("1.5000", 0), "15.000");
+  assert.equal(formatAmountInput(formatAmountInput("1234", 2) + "5", 2), "12.345");
+});

@@ -12,8 +12,16 @@
     type Frequency,
     type RecurringRule,
   } from "$lib/api";
+  import Amount from "$lib/components/Amount.svelte";
+  import Button from "$lib/components/Button.svelte";
+  import EmptyState from "$lib/components/EmptyState.svelte";
+  import Field from "$lib/components/Field.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
+  import Sheet from "$lib/components/Sheet.svelte";
   import { formatDate, isoDate } from "$lib/dates";
-  import { formatMinor, parseAmount } from "$lib/money";
+  import { formatAmountInput, formatMinor, parseAmount } from "$lib/money";
+  import { dataChanged, notify, ui } from "$lib/session.svelte";
 
   const FREQUENCY_LABEL: Record<Frequency, string> = {
     daily: "hari",
@@ -37,7 +45,9 @@
   let loading = $state(true);
   let error = $state("");
 
-  let editingId = $state<number | null>(null);
+  let sheetOpen = $state(false);
+  let sheet = $state<{ close: () => void }>();
+  let editing = $state<RecurringRule | null>(null);
   let kind = $state<FlowKind>("expense");
   let accountId = $state("");
   let categoryId = $state("");
@@ -47,16 +57,16 @@
   let every = $state(1);
   let startOn = $state(isoDate());
   let endOn = $state("");
-  let confirmingId = $state<number | null>(null);
+  let formError = $state("");
+  let confirmDelete = $state(false);
 
   const exponent = $derived(accountList[0]?.exponent ?? 0);
   const formCategories = $derived(categoryList.filter((c) => c.kind === kind));
 
-  function show(err: unknown) {
-    error =
-      err instanceof ApiError
-        ? (ERROR_TEXT[err.code] ?? ERROR_TEXT.internal)
-        : ERROR_TEXT.internal;
+  function message(err: unknown): string {
+    return err instanceof ApiError
+      ? (ERROR_TEXT[err.code] ?? ERROR_TEXT.internal)
+      : ERROR_TEXT.internal;
   }
 
   function schedule(rule: RecurringRule): string {
@@ -69,15 +79,16 @@
       rules = await api.list();
       error = "";
     } catch (err) {
-      show(err);
+      error = message(err);
     } finally {
       loading = false;
     }
   }
 
-  function reset() {
-    editingId = null;
+  function openNew() {
+    editing = null;
     kind = "expense";
+    accountId = accountList[0] ? String(accountList[0].id) : "";
     categoryId = "";
     amount = "";
     note = "";
@@ -85,10 +96,13 @@
     every = 1;
     startOn = isoDate();
     endOn = "";
+    formError = "";
+    confirmDelete = false;
+    sheetOpen = true;
   }
 
-  function startEdit(rule: RecurringRule) {
-    editingId = rule.id;
+  function openEdit(rule: RecurringRule) {
+    editing = rule;
     kind = rule.kind;
     accountId = String(rule.accountId);
     categoryId = String(rule.categoryId);
@@ -98,18 +112,28 @@
     every = rule.every;
     startOn = rule.startOn;
     endOn = rule.endOn ?? "";
-    error = "";
+    formError = "";
+    confirmDelete = false;
+    sheetOpen = true;
   }
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     const minor = parseAmount(amount, exponent);
     if (minor === null || minor.startsWith("-") || minor === "0") {
-      error = "Jumlah harus lebih dari nol. Contoh: 150.000";
+      formError = "Jumlah harus lebih dari nol.";
       return;
     }
     try {
-      if (editingId === null) {
+      if (editing) {
+        await api.update(editing.id, {
+          accountId: Number(accountId),
+          categoryId: Number(categoryId),
+          amountMinor: minor,
+          note,
+          endOn: endOn || null,
+        });
+      } else {
         await api.create({
           accountId: Number(accountId),
           categoryId: Number(categoryId),
@@ -121,38 +145,34 @@
           startOn,
           endOn: endOn || null,
         });
-      } else {
-        await api.update(editingId, {
-          accountId: Number(accountId),
-          categoryId: Number(categoryId),
-          amountMinor: minor,
-          note,
-          endOn: endOn || null,
-        });
       }
-      reset();
+      sheet?.close();
+      notify(editing ? "Aturan diperbarui." : "Aturan ditambahkan.");
       await load();
     } catch (err) {
-      show(err);
+      formError = message(err);
     }
   }
 
   async function toggle(rule: RecurringRule) {
     try {
       await api.setActive(rule.id, !rule.active, isoDate());
+      notify(rule.active ? "Aturan dijeda." : "Aturan dilanjutkan.");
       await load();
     } catch (err) {
-      show(err);
+      error = message(err);
     }
   }
 
-  async function remove(rule: RecurringRule) {
+  async function remove() {
+    if (!editing) return;
     try {
-      await api.remove(rule.id);
-      confirmingId = null;
+      await api.remove(editing.id);
+      sheet?.close();
+      notify("Aturan dihapus. Transaksi yang sudah tercatat tetap ada.");
       await load();
     } catch (err) {
-      show(err);
+      formError = message(err);
     }
   }
 
@@ -162,210 +182,225 @@
         accountsApi.list(false),
         categoriesApi.list(false),
       ]);
-      accountId = accountList[0] ? String(accountList[0].id) : "";
     } catch (err) {
-      show(err);
+      error = message(err);
     }
-    await load();
+  });
+
+  $effect(() => {
+    void ui.version;
+    void load();
   });
 </script>
 
-<main>
-  <h1>Transaksi berulang</h1>
+<PageHeader title="Berulang">
+  <Button variant="primary" onclick={openNew}>Tambah</Button>
+</PageHeader>
 
-  {#if error}
-    <p class="error" role="alert">{error}</p>
-  {/if}
+{#if error}
+  <p class="error" role="alert">{error}</p>
+{/if}
 
-  <section aria-label="Daftar aturan">
-    {#if loading}
-      <p>Memuat…</p>
-    {:else if rules.length === 0}
-      <p>Belum ada transaksi berulang.</p>
-    {:else}
-      <ul>
-        {#each rules as rule (rule.id)}
-          <li class:paused={!rule.active}>
-            <div class="main">
-              <strong>{rule.categoryName}</strong>
-              <small>
-                {schedule(rule)} · {rule.accountName}{rule.note ? ` · ${rule.note}` : ""}
-              </small>
-              <small>
-                {rule.active
-                  ? `Berikutnya ${formatDate(rule.nextDue)}`
-                  : "Dijeda"}{rule.endOn ? ` · sampai ${formatDate(rule.endOn)}` : ""}
-              </small>
-            </div>
-            <span class="amount" class:negative={rule.kind === "expense"}>
-              {rule.kind === "expense" ? "-" : ""}{formatMinor(rule.amountMinor, rule.exponent)}
-            </span>
-            <div class="actions">
-              <button type="button" onclick={() => startEdit(rule)}>Ubah</button>
-              <button type="button" onclick={() => toggle(rule)}>
-                {rule.active ? "Jeda" : "Lanjutkan"}
-              </button>
-              {#if confirmingId === rule.id}
-                <button type="button" class="danger" onclick={() => remove(rule)}>Ya, hapus</button>
-                <button type="button" onclick={() => (confirmingId = null)}>Batal</button>
-              {:else}
-                <button type="button" onclick={() => (confirmingId = rule.id)}>Hapus</button>
-              {/if}
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+{#if loading}
+  <p class="muted">Memuat…</p>
+{:else if rules.length === 0}
+  <EmptyState
+    title="Belum ada transaksi berulang"
+    text="Cocok untuk sewa, langganan, atau gaji. Dicatat otomatis saat aplikasi dibuka."
+  >
+    <Button variant="primary" onclick={openNew}>Tambah aturan</Button>
+  </EmptyState>
+{:else}
+  <ul class="rules" aria-label="Daftar aturan">
+    {#each rules as rule (rule.id)}
+      <li class:paused={!rule.active}>
+        <button type="button" class="item" onclick={() => openEdit(rule)}>
+          <span class="meta">
+            <strong>{rule.categoryName}</strong>
+            <small>{schedule(rule)} · {rule.accountName}{rule.note ? ` · ${rule.note}` : ""}</small>
+            <small>
+              {rule.active ? `Berikutnya ${formatDate(rule.nextDue)}` : "Dijeda"}{rule.endOn
+                ? ` · sampai ${formatDate(rule.endOn)}`
+                : ""}
+            </small>
+          </span>
+          <Amount
+            minor={rule.kind === "expense" ? `-${rule.amountMinor}` : rule.amountMinor}
+            exponent={rule.exponent}
+            plus
+            strong
+          />
+        </button>
+        <div class="row-actions">
+          <Button variant="ghost" onclick={() => toggle(rule)}>
+            {rule.active ? "Jeda" : "Lanjutkan"}
+          </Button>
+        </div>
+      </li>
+    {/each}
+  </ul>
+{/if}
 
-  <form onsubmit={submit} aria-label="Form aturan berulang">
-    <h2>{editingId === null ? "Tambah aturan" : "Ubah aturan"}</h2>
-    {#if editingId !== null}
-      <p class="hint">
-        Jadwal dan jenis tidak dapat diubah. Untuk mengubahnya, hapus aturan lalu buat yang baru;
+<Sheet bind:this={sheet} bind:open={sheetOpen} title={editing ? "Ubah aturan" : "Tambah aturan"}>
+  <form id="recurring-form" onsubmit={submit} class="form" aria-label="Form aturan berulang">
+    {#if editing}
+      <p class="muted">
+        Jadwal dan jenis tidak dapat diubah. Hapus aturan lalu buat yang baru bila perlu;
         transaksi yang sudah tercatat tetap ada.
       </p>
+    {:else}
+      <Segmented
+        label="Jenis"
+        bind:value={kind}
+        onchange={() => (categoryId = "")}
+        options={[
+          { value: "expense", label: "Pengeluaran" },
+          { value: "income", label: "Pemasukan" },
+        ]}
+      />
     {/if}
 
-    <label>
-      Jenis
-      <select bind:value={kind} disabled={editingId !== null} onchange={() => (categoryId = "")}>
-        <option value="expense">Pengeluaran</option>
-        <option value="income">Pemasukan</option>
-      </select>
-    </label>
-    <label>
-      Rekening
-      <select bind:value={accountId} required>
-        {#each accountList as account (account.id)}
-          <option value={String(account.id)}>{account.name}</option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      Kategori
-      <select bind:value={categoryId} required>
-        <option value="" disabled>Pilih kategori</option>
-        {#each formCategories as category (category.id)}
-          <option value={String(category.id)}>
-            {category.parentId === null ? "" : "— "}{category.name}
-          </option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      Jumlah
-      <input bind:value={amount} inputmode="decimal" autocomplete="off" required />
-    </label>
-    <label>
-      Catatan
+    <Field label="Jumlah">
+      <input
+        value={amount}
+        oninput={(e) => {
+          const input = e.currentTarget as HTMLInputElement;
+          amount = formatAmountInput(input.value, exponent);
+          input.value = amount;
+        }}
+        inputmode={exponent === 0 ? "numeric" : "decimal"}
+        autocomplete="off"
+        placeholder="0"
+        required
+      />
+    </Field>
+    <div class="two">
+      <Field label="Rekening">
+        <select bind:value={accountId} required>
+          {#each accountList as account (account.id)}
+            <option value={String(account.id)}>{account.name}</option>
+          {/each}
+        </select>
+      </Field>
+      <Field label="Kategori">
+        <select bind:value={categoryId} required>
+          <option value="" disabled>Pilih</option>
+          {#each formCategories as category (category.id)}
+            <option value={String(category.id)}>
+              {category.parentId === null ? "" : "↳ "}{category.name}
+            </option>
+          {/each}
+        </select>
+      </Field>
+    </div>
+    <Field label="Catatan (opsional)">
       <input bind:value={note} maxlength="500" autocomplete="off" />
-    </label>
+    </Field>
 
-    <div class="row">
-      <label>
-        Setiap
-        <input type="number" min="1" max="999" bind:value={every} disabled={editingId !== null} required />
-      </label>
-      <label>
-        Satuan
-        <select bind:value={frequency} disabled={editingId !== null}>
+    <div class="two">
+      <Field label="Setiap">
+        <input type="number" min="1" max="999" bind:value={every} disabled={editing !== null} required />
+      </Field>
+      <Field label="Satuan">
+        <select bind:value={frequency} disabled={editing !== null}>
           <option value="daily">Hari</option>
           <option value="weekly">Minggu</option>
           <option value="monthly">Bulan</option>
           <option value="yearly">Tahun</option>
         </select>
-      </label>
+      </Field>
     </div>
-    <label>
-      Mulai
-      <input type="date" bind:value={startOn} disabled={editingId !== null} required />
-    </label>
-    <label>
-      Berakhir (opsional)
-      <input type="date" bind:value={endOn} />
-    </label>
+    <div class="two">
+      <Field label="Mulai">
+        <input type="date" bind:value={startOn} disabled={editing !== null} required />
+      </Field>
+      <Field label="Berakhir (opsional)">
+        <input type="date" bind:value={endOn} />
+      </Field>
+    </div>
 
+    {#if formError}<p class="error" role="alert">{formError}</p>{/if}
+  </form>
+  {#snippet footer()}
     <div class="actions">
-      <button type="submit">{editingId === null ? "Simpan" : "Perbarui"}</button>
-      {#if editingId !== null}
-        <button type="button" onclick={reset}>Batal</button>
+      <Button type="submit" form="recurring-form" variant="primary" block>{editing ? "Simpan" : "Tambah"}</Button>
+      {#if editing}
+        {#if confirmDelete}
+          <Button variant="danger" onclick={remove}>Ya, hapus</Button>
+          <Button variant="ghost" onclick={() => (confirmDelete = false)}>Batal</Button>
+        {:else}
+          <Button variant="ghost" onclick={() => (confirmDelete = true)}>Hapus</Button>
+        {/if}
       {/if}
     </div>
-  </form>
-</main>
+  {/snippet}
+</Sheet>
 
 <style>
-  main {
-    max-width: 36rem;
-    margin: 0 auto;
-    padding: 1rem;
-  }
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  li {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 0.25rem 1rem;
-    padding: 0.75rem 0;
-    border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-  }
-  li.paused {
-    opacity: 0.65;
-  }
+  .muted,
   small {
-    display: block;
-    opacity: 0.75;
+    color: var(--text-muted);
   }
-  .amount {
-    font-variant-numeric: tabular-nums;
-    text-align: right;
+  .rules {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--space-2);
   }
-  .negative {
-    color: #b3261e;
+  .rules li {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
   }
-  .actions {
-    grid-column: 1 / -1;
+  .rules li.paused .item {
+    opacity: 0.6;
+  }
+  .item {
     display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-3);
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border: 0;
+    background: transparent;
+    text-align: left;
   }
-  .danger {
-    color: #b3261e;
+  .meta {
+    display: grid;
+    min-width: 0;
   }
-  .row {
+  .meta small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 var(--space-2) var(--space-2);
+  }
+  .form {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .two {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.75rem;
+    gap: var(--space-3);
   }
-  .hint {
-    margin: 0;
-    opacity: 0.8;
+  .actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
   }
   .error {
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    background: color-mix(in srgb, #b3261e 15%, transparent);
-  }
-  form {
-    display: grid;
-    gap: 0.75rem;
-    margin-top: 1.5rem;
-  }
-  label {
-    display: grid;
-    gap: 0.25rem;
-  }
-  input,
-  select,
-  button {
-    font: inherit;
-    padding: 0.5rem 0.75rem;
-  }
-  button {
-    min-height: 2.75rem;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--danger-bg);
+    color: var(--expense);
+    margin-bottom: var(--space-3);
   }
 </style>
