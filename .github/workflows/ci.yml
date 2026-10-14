@@ -98,9 +98,11 @@ jobs:
       - name: Release manifest must not request INTERNET
         run: |
           cd src-tauri/gen/android
-          ./gradlew :app:processUniversalReleaseMainManifest
+          # The fully merged manifest, including the AndroidX/plugin libraries:
+          # a dependency could otherwise add INTERNET without being seen.
+          ./gradlew :app:processUniversalReleaseManifest
           cd -
-          manifest=$(find src-tauri/gen/android/app/build/intermediates/merged_manifest/universalRelease -name AndroidManifest.xml | head -1)
+          manifest=$(find src-tauri/gen/android/app/build/intermediates/merged_manifests/universalRelease -name AndroidManifest.xml | head -1)
           test -n "$manifest"
           python3 scripts/check_offline.py manifest "$manifest"
       - uses: actions/upload-artifact@v4

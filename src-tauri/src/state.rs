@@ -4,22 +4,30 @@ use std::sync::{Mutex, PoisonError};
 
 use mt_storage::Db;
 
-use crate::error::AppError;
+use crate::{applock::LockService, error::AppError};
 
-/// Holds the open database, or `None` while storage is unavailable.
+/// Holds the open database and the app lock.
 ///
-/// Until the app lock exists (phase 7) the database is opened at startup; the
-/// lock will later close it and clear the option when the app is backgrounded.
+/// The database exists only while the app is unlocked: it is opened after a
+/// successful unlock and dropped (closing the connection) when the app locks.
 pub struct AppState {
     db: Mutex<Option<Db>>,
+    lock: LockService,
 }
 
 impl AppState {
-    pub fn new(db: Option<Db>) -> Self {
-        Self { db: Mutex::new(db) }
+    pub fn new(db: Option<Db>, lock: LockService) -> Self {
+        Self {
+            db: Mutex::new(db),
+            lock,
+        }
     }
 
-    /// Runs `f` with the database, or fails with `unavailable`.
+    pub fn applock(&self) -> &LockService {
+        &self.lock
+    }
+
+    /// Runs `f` with the database, or fails with `locked` / `unavailable`.
     pub fn with_db<T>(
         &self,
         f: impl FnOnce(&mut Db) -> Result<T, AppError>,
@@ -27,7 +35,17 @@ impl AppState {
         let mut guard = self.db.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_mut() {
             Some(db) => f(db),
+            None if self.lock.is_locked() => Err(AppError::locked()),
             None => Err(AppError::unavailable()),
         }
+    }
+
+    pub fn install_db(&self, db: Db) {
+        *self.db.lock().unwrap_or_else(PoisonError::into_inner) = Some(db);
+    }
+
+    /// Drops the connection. Call whenever the lock engages.
+    pub fn close_db(&self) {
+        *self.db.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 }

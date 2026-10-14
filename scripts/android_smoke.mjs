@@ -2,7 +2,15 @@
 // On-device smoke test: installs the debug APK, then drives the quick-add flow
 // with real adb taps (FAB -> type 25000 -> Simpan) and asserts the saved row.
 //
-//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID]
+//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric]
+//
+// With --lock it also sets a PIN and checks the app lock end to end: locked on
+// cold start and after backgrounding, wrong and right PIN, the delay after five
+// misses, and that data commands fail while locked.
+//
+// With --biometric it also exercises the fingerprint prompt. That needs an
+// emulator with a fingerprint enrolled (device PIN set, then
+// `am start -a android.settings.BIOMETRIC_ENROLL` and `adb emu finger touch 1`).
 //
 // Needs a debug build (the release WebView is not inspectable, by design), an
 // emulator or device on adb, and Node 22+ (global fetch and WebSocket).
@@ -101,11 +109,25 @@ async function evaluate(expression) {
 const invoke = (command, payload = {}) =>
   evaluate(`window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(payload)})`);
 
+/** Like invoke, but resolves to the error code instead of throwing. */
+const invokeCode = (command, payload = {}) =>
+  evaluate(
+    `window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(payload)}).then(() => 'ok', (e) => e?.code ?? 'error')`,
+  );
+
 // --- Real taps -------------------------------------------------------------
 
 /** Top of the WebView in device pixels (status bar inset), from the view hierarchy. */
 function webViewTop() {
-  adb("shell", "uiautomator", "dump", "/sdcard/mt-ui.xml");
+  // `uiautomator dump` can fail while the screen is animating; retry briefly.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      adb("shell", "uiautomator", "dump", "/sdcard/mt-ui.xml");
+      break;
+    } catch (error) {
+      if (attempt >= 4) throw error;
+    }
+  }
   const xml = adb("shell", "cat", "/sdcard/mt-ui.xml");
   const match = /class="android\.webkit\.WebView"[^>]*bounds="\[\d+,(\d+)\]/.exec(xml);
   if (!match) throw new Error("WebView bounds not found");
@@ -191,6 +213,142 @@ async function main() {
 
   const dialogs = adb("shell", "dumpsys", "window", "windows");
   check("no ANR dialog on screen", !/Application Not Responding/i.test(dialogs));
+
+  const windows = adb("shell", "dumpsys", "window", "windows");
+  const main = /Window #\d+ Window\{[^}]*com\.moneytracker\.app\/[^}]*\}:\n\s+(?:.*\n)*?\s+fl=([^\n]*)/.exec(windows);
+  check("FLAG_SECURE is set on the main window", /\bSECURE\b/.test(main?.[1] ?? ""), main?.[1]?.slice(0, 60));
+
+  if (flag("--lock")) await lockFlow(top, dpr);
+  if (flag("--biometric")) await biometricFlow();
+}
+
+const PIN = "493017";
+
+async function startApp() {
+  adb("shell", "am", "force-stop", PACKAGE);
+  adb("shell", "am", "start", "-n", ACTIVITY);
+  await until("the web view", async () => {
+    try {
+      ws?.close();
+      await connect();
+      return await evaluate("typeof window.__TAURI_INTERNALS__ !== 'undefined'");
+    } catch {
+      return false;
+    }
+  });
+}
+
+const finger = (id) => adb("emu", "finger", "touch", String(id));
+
+async function biometricFlow() {
+  const lockScreenShown = () => evaluate("!!document.querySelector('#lock-pin')");
+  const first = await invoke("lock_setup", { pin: PIN });
+  check("a fingerprint is enrolled on this device", first.biometric === "available", first.biometric);
+
+  // Enabling proves the prompt works: it resolves only after a touch.
+  const enabling = invoke("lock_biometric_set", { enabled: true });
+  await sleep(2500);
+  finger(1);
+  const enabled = await enabling;
+  check("a touch enables biometric unlock", enabled.biometricEnabled === true);
+
+  // Cold start: the prompt appears by itself; the enrolled finger unlocks.
+  await startApp();
+  await until("lock screen", lockScreenShown);
+  await sleep(2500);
+  finger(1);
+  await until("unlocked by fingerprint", async () => !(await lockScreenShown()));
+  check("the enrolled finger unlocks", true);
+  check("data commands work after a fingerprint unlock", (await invokeCode("accounts_list", { includeArchived: false })) === "ok");
+
+  // Back cancels the prompt and leaves the PIN path open, without an error.
+  adb("shell", "input", "keyevent", "KEYCODE_HOME");
+  await sleep(1500);
+  adb("shell", "am", "start", "-n", ACTIVITY);
+  await until("lock screen", lockScreenShown);
+  await sleep(2500);
+  adb("shell", "input", "keyevent", "KEYCODE_BACK");
+  await sleep(1500);
+  check("cancelling the prompt stays locked", await lockScreenShown());
+  check("cancelling shows no error", !(await evaluate("document.body.innerText.includes('Biometrik tidak berhasil')")));
+
+  // A finger that is not enrolled does not unlock.
+  await evaluate("document.querySelector('button.btn.ghost')?.click()");
+  await sleep(2000);
+  finger(2);
+  await sleep(1500);
+  check("an unenrolled finger does not unlock", await lockScreenShown());
+  finger(1);
+  await until("unlocked", async () => !(await lockScreenShown()));
+  check("the enrolled finger still works afterwards", true);
+
+  check("the lock can be removed", (await invokeCode("lock_remove", { current: PIN })) === "ok");
+}
+
+async function lockFlow(top, dpr) {
+  const typeInto = async (text) => {
+    await tapElement("#lock-pin", top, dpr);
+    adb("shell", "input", "text", text);
+    await sleep(300);
+    adb("shell", "input", "keyevent", "KEYCODE_BACK"); // hide the keyboard
+    await sleep(500);
+    await tapElement("form button[type=submit]", top, dpr);
+  };
+  const lockScreenShown = () => evaluate("!!document.querySelector('#lock-pin')");
+  const status = () => invoke("lock_status");
+
+  const first = await invoke("lock_setup", { pin: PIN });
+  check("setting a PIN leaves the app unlocked", first.configured && !first.locked);
+  check("a trivial PIN is refused", (await invokeCode("lock_setup", { pin: "123456" })) === "invalid_input");
+
+  // Cold start: the database must not be opened until the PIN is entered.
+  await startApp();
+  await until("lock screen", lockScreenShown);
+  check("cold start shows the lock screen", true);
+  check("data commands fail with `locked` while locked", (await invokeCode("accounts_list", { includeArchived: false })) === "locked");
+
+  // Wrong PIN, by real taps.
+  await typeInto("000001");
+  await until("error shown", () => evaluate("document.body.innerText.includes('PIN salah')"));
+  check("a wrong PIN is refused and explained", true);
+  check("the miss was counted", (await status()).failedAttempts === 1);
+
+  // Right PIN.
+  await typeInto(PIN);
+  await until("unlocked", async () => !(await lockScreenShown()));
+  check("the right PIN unlocks", true);
+  check("the miss counter reset", (await status()).failedAttempts === 0);
+  check("data commands work again", (await invokeCode("accounts_list", { includeArchived: false })) === "ok");
+
+  // Backgrounding locks (grace is immediate by default).
+  adb("shell", "input", "keyevent", "KEYCODE_HOME");
+  await sleep(1500);
+  adb("shell", "am", "start", "-n", ACTIVITY);
+  await until("lock screen after resume", lockScreenShown);
+  check("leaving the app locks it", true);
+  check("data commands fail again after backgrounding", (await invokeCode("accounts_list", { includeArchived: false })) === "locked");
+
+  // Five misses start a delay that even the right PIN must wait out.
+  for (let i = 0; i < 5; i += 1) {
+    check(`miss ${i + 1} is wrong_pin`, (await invokeCode("lock_unlock_pin", { pin: "000001" })) === "wrong_pin");
+  }
+  const delayed = await status();
+  check("the fifth miss starts a delay", delayed.retryAfterMs > 25_000 && delayed.retryAfterMs <= 30_000, String(delayed.retryAfterMs));
+  check("the right PIN is refused during the delay", (await invokeCode("lock_unlock_pin", { pin: PIN })) === "locked_out");
+
+  // A restart must not shorten it.
+  await startApp();
+  await until("lock screen", lockScreenShown);
+  const afterRestart = await status();
+  check("restarting keeps the miss count", afterRestart.failedAttempts >= 5, String(afterRestart.failedAttempts));
+  check("restarting keeps a delay", afterRestart.retryAfterMs > 0, String(afterRestart.retryAfterMs));
+
+  console.log("waiting out the delay...");
+  await sleep(Math.min(afterRestart.retryAfterMs, 60_000) + 1500);
+  check("the right PIN works after the delay", (await invokeCode("lock_unlock_pin", { pin: PIN })) === "ok");
+
+  // Clean up so the device is left without a lock.
+  check("the lock can be removed with the PIN", (await invokeCode("lock_remove", { current: PIN })) === "ok");
 }
 
 try {

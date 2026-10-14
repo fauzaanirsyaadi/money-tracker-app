@@ -26,6 +26,10 @@ ANDROID = "{http://schemas.android.com/apk/res/android}"
 ALLOWED_PERMISSIONS = {
     # Added by the AndroidX core library for non-exported dynamic receivers.
     "DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",  # matched by suffix, any package
+    # Added by androidx.biometric for the app-lock fingerprint/face prompt. Local
+    # hardware only; neither permission grants network or storage access.
+    "android.permission.USE_BIOMETRIC",
+    "android.permission.USE_FINGERPRINT",
 }
 
 # CSP source expressions that cannot reach a remote origin.

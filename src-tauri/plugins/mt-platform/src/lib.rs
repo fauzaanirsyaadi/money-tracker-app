@@ -21,6 +21,24 @@ use desktop::MtPlatform;
 #[cfg(mobile)]
 use mobile::MtPlatform;
 
+/// Whether the device can show a strong biometric prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BiometricAvailability {
+    Available,
+    /// Hardware exists but no fingerprint or face is enrolled.
+    NoneEnrolled,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BiometricOutcome {
+    Success,
+    /// The user dismissed the prompt or chose the PIN instead.
+    Cancelled,
+    /// Too many tries, hardware error or no biometrics.
+    Failed,
+}
+
 pub trait MtPlatformExt<R: Runtime> {
     fn mt_platform(&self) -> &MtPlatform<R>;
 }

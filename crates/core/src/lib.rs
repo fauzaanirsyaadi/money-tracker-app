@@ -3,6 +3,7 @@
 //! This crate performs no I/O and depends on neither storage nor UI.
 
 mod account;
+mod applock;
 mod budget;
 mod currency;
 mod error;
@@ -12,6 +13,10 @@ mod transaction;
 
 pub use account::{
     AccountDraft, AccountError, AccountKind, MAX_NAME_CHARS, normalize_account_name,
+};
+pub use applock::{
+    AutoLock, FREE_ATTEMPTS, PIN_MAX_DIGITS, PIN_MIN_DIGITS, PinProblem, is_plausible_pin,
+    lockout_delay, validate_new_pin,
 };
 pub use budget::{
     BudgetDraft, BudgetError, BudgetProgress, BudgetStatus, WARN_AT_BP, YearMonth, progress,

@@ -97,6 +97,10 @@ export type ErrorCode =
   | "archived"
   | "currency_mismatch"
   | "amount_out_of_range"
+  | "locked"
+  | "wrong_pin"
+  | "locked_out"
+  | "cancelled"
   | "internal";
 
 export class ApiError extends Error {
@@ -116,11 +120,20 @@ function toApiError(raw: unknown): ApiError {
   return new ApiError("internal", "unexpected error");
 }
 
+let onLocked: (() => void) | null = null;
+
+/** Called when any command reports the app is locked, so the UI shows the lock screen. */
+export function setLockedHandler(handler: (() => void) | null): void {
+  onLocked = handler;
+}
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, args);
   } catch (raw) {
-    throw toApiError(raw);
+    const error = toApiError(raw);
+    if (error.code === "locked") onLocked?.();
+    throw error;
   }
 }
 
@@ -305,4 +318,35 @@ export const reports = {
 export const platform = {
   /** Matches the status/navigation bar icons to the app theme. */
   systemBars: (dark: boolean) => call<void>("system_bars_set", { dark }),
+};
+
+export type BiometricAvailability = "available" | "none_enrolled" | "unavailable";
+
+export interface LockStatus {
+  /** A PIN is set (or the lock data is damaged). */
+  configured: boolean;
+  locked: boolean;
+  /** The lock data is damaged; the app stays locked. */
+  broken: boolean;
+  biometricEnabled: boolean;
+  biometric: BiometricAvailability;
+  autoLockSeconds: number;
+  failedAttempts: number;
+  /** Milliseconds until another PIN guess is allowed, or null. */
+  retryAfterMs: number | null;
+}
+
+export const AUTO_LOCK_CHOICES = [0, 30, 60, 300] as const;
+
+export const lock = {
+  status: () => call<LockStatus>("lock_status"),
+  unlockPin: (pin: string) => call<LockStatus>("lock_unlock_pin", { pin }),
+  unlockBiometric: () => call<LockStatus>("lock_unlock_biometric"),
+  setup: (pin: string) => call<LockStatus>("lock_setup", { pin }),
+  changePin: (current: string, newPin: string) =>
+    call<LockStatus>("lock_change_pin", { current, new: newPin }),
+  remove: (current: string) => call<LockStatus>("lock_remove", { current }),
+  setBiometric: (enabled: boolean) => call<LockStatus>("lock_biometric_set", { enabled }),
+  setAutoLock: (seconds: number) => call<LockStatus>("lock_auto_set", { seconds }),
+  lockNow: () => call<LockStatus>("lock_now"),
 };

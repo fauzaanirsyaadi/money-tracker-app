@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "wired into the unlock flow in a later phase; exercised by the debug self-test"
-)]
-
 //! Creates, wraps and loads the database key, then opens the database.
 //!
 //! The 32-byte SQLCipher key is random, never leaves this process in clear
@@ -32,7 +27,8 @@ static KEY_LOCK: Mutex<()> = Mutex::new(());
 pub enum VaultError {
     Io,
     Keystore,
-    Storage(StorageError),
+    /// The database could not be opened or migrated (detail stays out of logs).
+    Storage,
     /// The database exists but its wrapped key is missing: refusing to
     /// create a new key, which would make the data unreadable.
     KeyMissing,
@@ -46,8 +42,8 @@ impl From<io::Error> for VaultError {
 }
 
 impl From<StorageError> for VaultError {
-    fn from(err: StorageError) -> Self {
-        Self::Storage(err)
+    fn from(_: StorageError) -> Self {
+        Self::Storage
     }
 }
 
@@ -110,22 +106,6 @@ fn load_or_create_key(
         }
         Err(_) => Err(VaultError::Io),
     }
-}
-
-/// Wrapped key bytes as stored on disk, for the self-test only.
-#[cfg(debug_assertions)]
-pub fn wrapped_key_bytes<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<u8>, VaultError> {
-    let dir = app.path().app_data_dir().map_err(|_| VaultError::Io)?;
-    Ok(fs::read(dir.join(KEY_FILE))?)
-}
-
-#[cfg(debug_assertions)]
-pub fn db_path<R: Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, VaultError> {
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|_| VaultError::Io)?
-        .join(DB_FILE))
 }
 
 #[cfg(test)]

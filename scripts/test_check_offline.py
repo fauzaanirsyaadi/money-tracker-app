@@ -33,6 +33,18 @@ class ManifestTests(unittest.TestCase):
         xml = manifest(["com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"])
         self.assertEqual(self.run_manifest(xml), [])
 
+    def test_biometric_permissions_are_allowed_but_network_still_is_not(self):
+        ok = manifest(
+            [
+                "android.permission.USE_BIOMETRIC",
+                "android.permission.USE_FINGERPRINT",
+                "com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+            ]
+        )
+        self.assertEqual(self.run_manifest(ok), [])
+        mixed = manifest(["android.permission.USE_BIOMETRIC", "android.permission.INTERNET"])
+        self.assertTrue(any("INTERNET" in p for p in self.run_manifest(mixed)))
+
     def test_internet_permission_fails(self):
         problems = self.run_manifest(manifest(["android.permission.INTERNET"]))
         self.assertTrue(any("INTERNET" in p for p in problems), problems)

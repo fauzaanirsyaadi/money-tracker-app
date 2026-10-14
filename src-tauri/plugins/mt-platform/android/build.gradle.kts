@@ -31,4 +31,6 @@ dependencies {
     implementation(project(":tauri-android"))
     // Already in the app through appcompat; declared so the plugin compiles on its own.
     implementation("androidx.core:core-ktx:1.13.0")
+    // System fingerprint/face prompt. Apache-2.0, Google, stable 1.1.0 (BiometricPrompt, API 23+).
+    implementation("androidx.biometric:biometric:1.1.0")
 }

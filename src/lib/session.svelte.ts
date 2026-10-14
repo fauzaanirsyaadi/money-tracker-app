@@ -1,6 +1,6 @@
 // UI state shared between the shell, the quick-add sheet and the screens.
 
-import type { Transaction } from "$lib/api";
+import { lock, setLockedHandler, type LockStatus, type Transaction } from "$lib/api";
 
 export const ui = $state({
   /** Whether the quick-add / edit sheet is open. */
@@ -31,3 +31,39 @@ export function notify(message: string, ms = 3000): void {
     ui.notice = "";
   }, ms);
 }
+
+/** What the app lock currently says. `status` is null until the first answer. */
+export const lockState = $state({
+  status: null as LockStatus | null,
+  /** Counts locked -> unlocked transitions, so work that needs data can re-run. */
+  unlocks: 0,
+  /** True while the app is hidden: content is covered before the OS snapshots it. */
+  covered: false,
+});
+
+export function applyLockStatus(next: LockStatus): void {
+  const wasLocked = lockState.status?.locked !== false;
+  lockState.status = next;
+  if (next.locked) {
+    // Nothing from before the lock may survive on screen.
+    ui.sheetOpen = false;
+    ui.editing = null;
+    ui.notice = "";
+  } else if (wasLocked) {
+    lockState.unlocks += 1;
+    dataChanged();
+  }
+}
+
+export async function refreshLock(): Promise<void> {
+  try {
+    applyLockStatus(await lock.status());
+  } catch {
+    // No backend (plain browser): leave the status unknown.
+  }
+}
+
+// Any command answering "locked" means the lock engaged behind our back.
+setLockedHandler(() => {
+  void refreshLock();
+});

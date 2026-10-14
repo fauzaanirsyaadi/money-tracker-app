@@ -1,7 +1,9 @@
 package com.moneytracker.app
 
+import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -10,6 +12,15 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+
+    // Keeps balances out of screenshots, screen recordings and the recent-apps
+    // thumbnail, on every screen. Debuggable builds may opt out with
+    // `am start --ez mt_insecure true` so the emulator can be captured; a
+    // release build ignores the extra.
+    val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+    if (!(debuggable && intent?.getBooleanExtra("mt_insecure", false) == true)) {
+      window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+    }
 
     // Edge-to-edge draws behind the status bar, the gesture bar and the cutout.
     // Pad the content by those insets (and the keyboard, so a bottom sheet is

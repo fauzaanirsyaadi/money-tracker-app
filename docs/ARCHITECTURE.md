@@ -437,7 +437,7 @@ Lingkungan: macOS arm64, Rust 1.98, NDK 27.2.12479018, JDK 21, `minSdk` 24 (gene
 |---|---|
 | Keystore berperangkat keras | Emulator melaporkan `software`. `tee`/`strongbox` hanya dapat dibuktikan di HP asli |
 | Penolakan DB tanpa Keystore | Terbukti lewat kunci salah; skenario "kunci Keystore hilang/diinvalidasi" belum diuji di perangkat |
-| `setUnlockedDeviceRequired(true)` | **Sengaja tidak dipakai** di spike: risiko tak terbaca pada perangkat tanpa layar kunci belum dipahami. Putuskan di Fase 7 |
+| `setUnlockedDeviceRequired(true)` | **Sengaja tidak dipakai** di spike: risiko tak terbaca pada perangkat tanpa layar kunci belum dipahami. **Diputuskan di Fase 7A: dipakai** (§23) |
 | Pustaka rilis | Hanya build debug yang diukur. `.so` debug 145–164 MB, APK debug (arm64) ±285 MB. Ukuran rilis diukur di Fase 8 |
 | Build 4-ABI via Gradle | Hanya `aarch64` dibangun sebagai APK; ABI lain hanya diuji sampai link |
 | CI | Job `android` belum pernah berjalan; NDK 27.2 dan JDK 17 belum diuji di CI |
@@ -450,7 +450,7 @@ Lingkungan: macOS arm64, Rust 1.98, NDK 27.2.12479018, JDK 21, `minSdk` 24 (gene
 4. Kunci DB dibuat dengan `getrandom` di Rust, lalu dibungkus; berkas `db.key` ditulis dengan tulis-lalu-ganti-nama.
 5. Bila `money.db` ada tetapi `db.key` hilang, aplikasi **menolak** membuat kunci baru (mencegah data tak terbaca diam-diam menimpa).
 6. `cargo check --target <android>` polos kini membutuhkan toolchain NDK di `PATH` (OpenSSL dikompilasi dari sumber); build lewat `pnpm tauri android build` menyetelnya sendiri. Cek cepat Android di CI dilakukan lewat job `android`, bukan `cargo check` terpisah.
-7. Perintah uji mandiri `storage_selftest` hanya ada di build debug (`cfg(debug_assertions)`), tanpa kunci atau data keuangan di keluaran; dihapus bersama pemasangan alur buka-kunci di Fase 7.
+7. Perintah uji mandiri `storage_selftest` hanya ada di build debug (`cfg(debug_assertions)`), tanpa kunci atau data keuangan di keluaran; **dihapus di Fase 7A** bersama pemasangan alur buka-kunci.
 
 ### Perbaikan setelah review adversarial (kelompok 1 dan 2)
 
@@ -784,3 +784,59 @@ Ponsel: tab bawah, satu kolom. ≥ 720 px: rel samping, lembar menjadi dialog te
 - Skrip E2E sebelumnya (DOM lama) tidak lagi relevan; alur diverifikasi dengan ketukan nyata dan pemeriksaan DOM baru, belum ada suite E2E otomatis yang disimpan di repo.
 - Tidak ada animasi transisi antar-layar; lembar hanya menaik halus (dihormati `prefers-reduced-motion`).
 - Salin anggaran dari bulan lalu dan urutan manual rekening belum ada.
+
+---
+
+## 23. Fase 7, langkah A: kunci aplikasi (2026-10-14)
+
+Urutan Fase 7 yang disepakati: **A** kunci aplikasi + `FLAG_SECURE`, **B** backup/restore terenkripsi (SAF), **C** temuan tertunda, lalu `/security-review`, `cargo audit`, `cargo deny check`. Bagian ini mencakup A dan langkah pra-Fase 7. Kompromi PIN/biometrik dijelaskan di [SECURITY.md](SECURITY.md).
+
+### Pra-Fase 7
+
+| Item | Hasil |
+|---|---|
+| Smoke test adb di repo | `scripts/android_smoke.mjs`: memasang APK debug, mengetuk **+**, mengetik 25000, mengetuk **Simpan**, memastikan baris tersimpan (`-25000`, pengeluaran, rekening, kategori), tidak ada ANR, `FLAG_SECURE` aktif. `--lock` dan `--biometric` menambah pemeriksaan kunci. Dijalankan di emulator: **43 pemeriksaan lulus** |
+| Tes regresi | Dua bug Fase 6 sudah punya tes (`virtual.test.ts` "a list that shrank…", `money.test.ts` umpan balik `formatAmountInput`) |
+| Ikon status bar mengikuti tema aplikasi | Plugin `mt-platform` (API Rust saja) + perintah aplikasi `system_bars_set`. Diverifikasi: sistem terang + tema gelap → `LIGHT_STATUS_BARS` hilang |
+| Anggaran bundel JS | 120 → **80 KB gzip** (saat ini 61,7 KB) |
+| Daftar temuan tertunda | Dengan tingkat, berkas, dan baris di §15 |
+
+### Keputusan dan implementasi
+
+| Keputusan | Pilihan |
+|---|---|
+| Hubungan PIN dengan kunci DB | **Gerbang UI, bukan kriptografis** (K2). Kunci DB tetap dibungkus Keystore, tanpa ikatan biometrik per-pemakaian |
+| `setUnlockedDeviceRequired` | **Dipakai** (Android 9+). Aplikasi tak punya kerja latar, jadi tidak ada yang rusak. Bukan syarat autentikasi per-pemakaian |
+| Penyimpanan verifier | `lock.json` di samping DB (DB tidak dibuka saat terkunci), ditulis atomik (tmp + fsync + rename), berisi PHC Argon2id (19 MiB, t=2, p=1), hitungan salah, biometrik, tenggang |
+| Aturan PIN | 6–16 angka; ditolak bila semua sama atau berurutan (`mt-core::applock`) |
+| Penundaan | 0 untuk 4 salah pertama; lalu 30 dtk, 1, 5, 15, 60 mnt. Hitungan **ditulis sebelum PIN diperiksa**; jeda memakai `Instant` (monotonik), mulai penuh lagi setelah proses dimulai ulang |
+| Status saat start | Tanpa `lock.json`: DB dibuka seperti sebelumnya. Dengan `lock.json`: DB **tidak** dibuka. `lock.json` tak terbaca atau versi tak dikenal: **gagal tertutup** |
+| Mengunci | Native: `WindowEvent::Suspended` (onPause) menutup DB (tenggang 0) atau mencatat waktu; `Resumed` memeriksa tenggang dengan dua jam dan mengunci bila jam dinding mundur. Dilakukan di Rust, bukan di WebView yang mungkin beku |
+| Biometrik | `BiometricPrompt` AndroidX (`BIOMETRIC_STRONG`, tanpa `CryptoObject`) di plugin sendiri, **bukan** `tauri-plugin-biometric`: hasilnya harus dari native langsung ke Rust, tidak dilewatkan lewat JS (R8). Mengaktifkan mensyaratkan satu sentuhan yang berhasil |
+| `FLAG_SECURE` | Seluruh aplikasi (K6). Build debug dapat membukanya dengan `am start --ez mt_insecure true` agar emulator bisa difoto; build rilis mengabaikan ekstra itu |
+| Perintah | `lock_status`, `lock_unlock_pin`, `lock_unlock_biometric`, `lock_setup`, `lock_change_pin`, `lock_remove`, `lock_biometric_set`, `lock_auto_set`, `lock_now`. Perintah data gagal dengan `locked` bila DB tertutup |
+| UI | `LockScreen` (menggantikan seluruh shell, sehingga komponen dan datanya dibuang), `/settings`, tombol kunci + gerigi di bilah atas, penutup konten saat `visibilitychange` hidden, catch-up berulang dijalankan setelah tiap buka-kunci |
+| Capabilities | Tetap `core:default` saja. Plugin `mt-platform` dan `mt-keystore` tanpa perintah JS |
+
+### Temuan selama verifikasi
+
+| Temuan | Tindakan |
+|---|---|
+| **Deadlock/ANR:** perintah Tauri sinkron berjalan di thread utama, lalu menunggu Kotlin yang memakai `runOnUiThread` (thread yang sama) | Semua perintah platform `async`; komentar di `platform.rs`; terverifikasi tidak ada ANR |
+| **Celah penjaga CI:** `processUniversalReleaseMainManifest` tidak memuat manifes pustaka (izin `USE_BIOMETRIC` tidak muncul), jadi dependensi yang menambah `INTERNET` akan lolos | CI memakai `processUniversalReleaseManifest` (manifes gabungan penuh). `USE_BIOMETRIC` dan `USE_FINGERPRINT` masuk daftar putih dengan tes |
+| Unlock lewat `invoke` mentah tidak mengubah layar | Hanya artefak uji (UI memperbarui status dari panggilannya sendiri); `visibilitychange` menyinkronkan |
+| `uiautomator dump` kadang gagal saat layar beranimasi | Skrip mencoba ulang |
+| Jendela utama memuat `KEEP_SCREEN_ON` pada build debug | Belum dilacak sumbernya (tidak ada di kode kita, wry, atau tauri); periksa pada build rilis di langkah C |
+
+### Hasil uji
+
+- Rust: 228 tes lulus (+ `mt-core::applock` 6, `applock` app 16). `clippy -D warnings`, `cargo fmt`, `cargo deny check`, `cargo audit` bersih.
+- UI: 36 tes (+5 `lock.test.ts`). Penjaga offline: 15 tes.
+- Emulator (`android_smoke.mjs --lock --biometric`): 43 pemeriksaan, termasuk PIN salah/benar dengan ketukan nyata, kunci saat ke latar belakang, penundaan setelah 5 salah dan bertahan setelah mulai ulang dingin, prompt biometrik otomatis, jari terdaftar membuka, Back membatalkan tanpa galat, jari tak terdaftar tidak membuka.
+- Biometrik diuji dengan sidik jari emulator. Perilaku di perangkat nyata (terutama vendor dengan wajah Kelas 2) belum diverifikasi.
+
+### Belum dilakukan
+
+- Lupa PIN: tak ada pemulihan dalam aplikasi sampai langkah B. Pengaturan memperingatkan.
+- M5, L1–L9 (langkah C). L7 sudah selesai sebelumnya.
+- Tidak ada dukungan "layar kunci" sistem sebagai cadangan PIN (`DEVICE_CREDENTIAL`) — sengaja, agar tidak ada jalur kedua yang tak terhitung.

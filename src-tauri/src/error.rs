@@ -19,6 +19,13 @@ pub enum ErrorCode {
     Archived,
     CurrencyMismatch,
     AmountOutOfRange,
+    /// The app is locked; unlock before using data commands.
+    Locked,
+    WrongPin,
+    /// Too many wrong PINs in a row; try again later.
+    LockedOut,
+    /// The user dismissed the biometric prompt.
+    Cancelled,
     Internal,
 }
 
@@ -35,6 +42,10 @@ impl AppError {
 
     pub const fn unavailable() -> Self {
         Self::new(ErrorCode::Unavailable, "storage is not available")
+    }
+
+    pub const fn locked() -> Self {
+        Self::new(ErrorCode::Locked, "the app is locked")
     }
 
     pub const fn invalid(message: &'static str) -> Self {

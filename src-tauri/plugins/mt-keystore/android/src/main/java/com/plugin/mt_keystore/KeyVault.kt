@@ -38,8 +38,13 @@ class KeyVault {
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
             .setRandomizedEncryptionRequired(true)
-        if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            spec.setIsStrongBoxBacked(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            // The key is unusable while the device is locked. The app has no
+            // background work, so nothing needs it then. This is *not* a
+            // per-use user-authentication requirement: such a key would be lost
+            // when fingerprints change, and the data with it (docs/SECURITY.md).
+            spec.setUnlockedDeviceRequired(true)
+            if (strongBox) spec.setIsStrongBoxBacked(true)
         }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         generator.init(spec.build())

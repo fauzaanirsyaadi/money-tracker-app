@@ -289,7 +289,13 @@ mod tests {
 
     #[test]
     fn unavailable_storage_is_reported_not_panicked() {
-        let state = AppState::new(None);
+        let state = AppState::new(
+            None,
+            crate::applock::LockService::load(
+                std::path::Path::new("/nonexistent/mt-test"),
+                std::time::Instant::now(),
+            ),
+        );
         let result = state.with_db(|db| list(db, false));
         assert_eq!(result.unwrap_err().code, ErrorCode::Unavailable);
     }

@@ -1,15 +1,24 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
 
   import "../app.css";
 
   import { page } from "$app/state";
-  import { ApiError, platform, recurring } from "$lib/api";
+  import { ApiError, lock, platform, recurring } from "$lib/api";
   import Icon from "$lib/components/Icon.svelte";
+  import LockScreen from "$lib/components/LockScreen.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import { isoDate } from "$lib/dates";
   import { isDarkTheme, loadTheme, nextTheme, saveTheme, type ThemePref } from "$lib/prefs";
-  import { dataChanged, notify, openQuickAdd, ui } from "$lib/session.svelte";
+  import {
+    applyLockStatus,
+    dataChanged,
+    lockState,
+    notify,
+    openQuickAdd,
+    refreshLock,
+    ui,
+  } from "$lib/session.svelte";
 
   let { children } = $props();
 
@@ -51,14 +60,17 @@
     applyTheme(theme);
   }
 
-  // Recurring transactions are computed when the app opens: no background
-  // service exists. A failure here must not block the app.
-  onMount(async () => {
-    theme = loadTheme();
-    applyTheme(theme);
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onSystemChange = () => syncSystemBars(theme);
-    media.addEventListener("change", onSystemChange);
+  async function lockNow() {
+    try {
+      applyLockStatus(await lock.lockNow());
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+    }
+  }
+
+  // Recurring transactions are computed when the app opens and after every
+  // unlock: no background service exists. A failure must not block the app.
+  async function catchUp() {
     try {
       const report = await recurring.catchUp(isoDate());
       if (report.transactionsCreated > 0) {
@@ -68,52 +80,111 @@
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
     }
+  }
+
+  $effect(() => {
+    if (lockState.unlocks > 0) untrack(() => void catchUp());
   });
+
+  // Cover the content the moment the app is hidden, before the OS takes its
+  // task-switcher snapshot, and re-check the lock when it comes back.
+  function onVisibility() {
+    if (document.visibilityState === "hidden") {
+      if (lockState.status?.configured) lockState.covered = true;
+    } else {
+      void refreshLock().finally(() => {
+        lockState.covered = false;
+      });
+    }
+  }
+
+  onMount(() => {
+    theme = loadTheme();
+    applyTheme(theme);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onSystemChange = () => syncSystemBars(theme);
+    media.addEventListener("change", onSystemChange);
+    document.addEventListener("visibilitychange", onVisibility);
+    void refreshLock();
+    return () => {
+      media.removeEventListener("change", onSystemChange);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  });
+
+  const unlocked = $derived(lockState.status !== null && !lockState.status.locked);
 </script>
 
-<div class="shell">
-  <header class="topbar">
-    <span class="brand">Money Tracker</span>
+{#if lockState.status === null}
+  <div class="cover" aria-hidden="true"></div>
+{:else if lockState.status.locked}
+  <LockScreen />
+{/if}
+
+{#if unlocked}
+  <div class="shell">
+    <header class="topbar">
+      <span class="brand">Money Tracker</span>
+      <span class="actions">
+        {#if lockState.status?.configured}
+          <button type="button" class="icon-btn" onclick={lockNow} aria-label="Kunci sekarang">
+            <Icon name="lock" />
+          </button>
+        {/if}
+        <a
+          class="icon-btn"
+          href="/settings"
+          aria-label="Pengaturan"
+          aria-current={page.url.pathname === "/settings" ? "page" : undefined}
+        >
+          <Icon name="settings" />
+        </a>
+        <button
+          type="button"
+          class="icon-btn"
+          onclick={cycleTheme}
+          aria-label={`Tema: ${THEME_LABEL[theme]}. Ketuk untuk mengganti.`}
+        >
+          <Icon name={theme === "auto" ? "auto" : theme === "light" ? "sun" : "moon"} />
+        </button>
+      </span>
+    </header>
+
+    <nav class="tabs" aria-label="Navigasi utama">
+      {#each tabs as tab (tab.href)}
+        <a
+          href={tab.href}
+          aria-current={page.url.pathname === tab.href ? "page" : undefined}
+        >
+          <Icon name={tab.icon} size={22} />
+          <span>{tab.label}</span>
+        </a>
+      {/each}
+    </nav>
+
+    <div class="content">
+      {#if ui.notice}
+        <p class="notice" role="status">{ui.notice}</p>
+      {/if}
+      {@render children()}
+    </div>
+
     <button
       type="button"
-      class="icon-btn"
-      onclick={cycleTheme}
-      aria-label={`Tema: ${THEME_LABEL[theme]}. Ketuk untuk mengganti.`}
+      class="fab"
+      onclick={() => openQuickAdd()}
+      aria-label="Catat transaksi"
     >
-      <Icon name={theme === "auto" ? "auto" : theme === "light" ? "sun" : "moon"} />
+      <Icon name="plus" size={28} />
     </button>
-  </header>
-
-  <nav class="tabs" aria-label="Navigasi utama">
-    {#each tabs as tab (tab.href)}
-      <a
-        href={tab.href}
-        aria-current={page.url.pathname === tab.href ? "page" : undefined}
-      >
-        <Icon name={tab.icon} size={22} />
-        <span>{tab.label}</span>
-      </a>
-    {/each}
-  </nav>
-
-  <div class="content">
-    {#if ui.notice}
-      <p class="notice" role="status">{ui.notice}</p>
-    {/if}
-    {@render children()}
   </div>
 
-  <button
-    type="button"
-    class="fab"
-    onclick={() => openQuickAdd()}
-    aria-label="Catat transaksi"
-  >
-    <Icon name="plus" size={28} />
-  </button>
-</div>
+  <QuickAdd />
+{/if}
 
-<QuickAdd />
+{#if lockState.covered && unlocked}
+  <div class="cover" aria-hidden="true"></div>
+{/if}
 
 <style>
   .shell {
@@ -134,6 +205,16 @@
     border-bottom: 1px solid var(--border);
     min-height: 3.25rem;
   }
+  .actions {
+    display: flex;
+    align-items: center;
+  }
+  .cover {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: var(--bg);
+  }
   .brand {
     font-weight: 700;
     letter-spacing: 0.01em;
@@ -146,6 +227,7 @@
     border: 0;
     border-radius: 999px;
     background: transparent;
+    color: inherit;
   }
   .tabs {
     position: fixed;
