@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/storage", "src-tauri", "src-tauri/plugins/mt-keystore", "src-tauri/plugins/mt-platform"]
+members = ["crates/core", "crates/storage", "crates/backup", "src-tauri", "src-tauri/plugins/mt-keystore", "src-tauri/plugins/mt-platform"]
 
 [workspace.package]
 version = "0.1.0"

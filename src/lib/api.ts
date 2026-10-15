@@ -101,6 +101,11 @@ export type ErrorCode =
   | "wrong_pin"
   | "locked_out"
   | "cancelled"
+  | "weak_passphrase"
+  | "wrong_passphrase"
+  | "not_a_backup"
+  | "unsupported_backup"
+  | "backup_damaged"
   | "internal";
 
 export class ApiError extends Error {
@@ -349,4 +354,31 @@ export const lock = {
   setBiometric: (enabled: boolean) => call<LockStatus>("lock_biometric_set", { enabled }),
   setAutoLock: (seconds: number) => call<LockStatus>("lock_auto_set", { seconds }),
   lockNow: () => call<LockStatus>("lock_now"),
+};
+
+export interface BackupCounts {
+  accounts: number;
+  categories: number;
+  transactions: number;
+  budgets: number;
+  recurringRules: number;
+}
+
+export interface RestorePreview {
+  backup: BackupCounts;
+  current: BackupCounts;
+}
+
+export const backup = {
+  /** Encrypts and offers the file to the system "save as" picker. */
+  export: (passphrase: string, name: string) =>
+    call<{ saved: boolean; counts: BackupCounts }>("backup_export", { passphrase, name }),
+  /** Step 1 of a restore: choose the file. Resolves false when cancelled. */
+  restorePick: () => call<boolean>("backup_restore_pick"),
+  /** Step 2: decrypt and verify without touching current data. */
+  restorePrepare: (passphrase: string) =>
+    call<RestorePreview>("backup_restore_prepare", { passphrase }),
+  /** Step 3: replace current data with the verified backup. */
+  restoreCommit: () => call<BackupCounts>("backup_restore_commit"),
+  restoreCancel: () => call<void>("backup_restore_cancel"),
 };

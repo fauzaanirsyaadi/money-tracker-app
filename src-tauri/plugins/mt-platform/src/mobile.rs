@@ -4,7 +4,9 @@ use tauri::{
     plugin::{PluginApi, PluginHandle},
 };
 
-use crate::{BiometricAvailability, BiometricOutcome, Result};
+use std::path::Path;
+
+use crate::{BiometricAvailability, BiometricOutcome, Error, FileOutcome, Result};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
@@ -24,6 +26,17 @@ struct PromptText<'a> {
     title: &'a str,
     subtitle: &'a str,
     negative: &'a str,
+}
+
+#[derive(Serialize)]
+struct SaveRequest<'a> {
+    source: &'a str,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct PickRequest<'a> {
+    destination: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -90,5 +103,36 @@ impl<R: Runtime> MtPlatform<R> {
             "cancelled" => BiometricOutcome::Cancelled,
             _ => BiometricOutcome::Failed,
         })
+    }
+
+    /// Lets the user choose where to save `source` (Storage Access Framework)
+    /// and copies it there. The native side only ever handles the file's
+    /// bytes, which are already encrypted.
+    pub async fn save_file(&self, source: &Path, name: &str) -> Result<FileOutcome> {
+        let source = source.to_str().ok_or(Error::Platform)?;
+        let response: Outcome = self
+            .0
+            .run_mobile_plugin_async("saveFile", SaveRequest { source, name })
+            .await?;
+        file_outcome(&response.outcome)
+    }
+
+    /// Lets the user choose a file and copies it to `destination` (an
+    /// app-private path). Nothing is parsed on the native side.
+    pub async fn pick_file(&self, destination: &Path) -> Result<FileOutcome> {
+        let destination = destination.to_str().ok_or(Error::Platform)?;
+        let response: Outcome = self
+            .0
+            .run_mobile_plugin_async("pickFile", PickRequest { destination })
+            .await?;
+        file_outcome(&response.outcome)
+    }
+}
+
+fn file_outcome(outcome: &str) -> Result<FileOutcome> {
+    match outcome {
+        "done" => Ok(FileOutcome::Done),
+        "cancelled" => Ok(FileOutcome::Cancelled),
+        _ => Err(Error::Platform),
     }
 }

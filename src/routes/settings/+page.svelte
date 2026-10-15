@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ApiError, AUTO_LOCK_CHOICES, lock, type LockStatus } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
+  import BackupPanel from "$lib/components/BackupPanel.svelte";
   import Card from "$lib/components/Card.svelte";
   import Field from "$lib/components/Field.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -115,8 +116,9 @@
       </Button>
     </form>
     <p class="warn">
-      Catat PIN Anda. Tidak ada cara memulihkannya; jika lupa, data hanya bisa dipulihkan dari
-      cadangan terenkripsi (fitur ini menyusul).
+      Catat PIN Anda. Tidak ada cara memulihkannya di dalam aplikasi; jika lupa, satu-satunya jalan
+      adalah memulihkan dari cadangan terenkripsi (lihat bagian Cadangan di bawah). Buat cadangan
+      sekarang.
     </p>
   {:else}
     <div class="stack">
@@ -197,7 +199,13 @@
   {/if}
 </Card>
 
+<div class="gap"></div>
+<BackupPanel />
+
 <style>
+  .gap {
+    height: var(--space-4);
+  }
   h2 {
     margin: 0 0 var(--space-2);
     font-size: var(--fs-lg);

@@ -87,7 +87,7 @@ async fn status_of(app: &AppHandle) -> LockStatusDto {
     LockStatusDto::new(snapshot, biometric)
 }
 
-fn require_unlocked(state: &AppState) -> Result<(), AppError> {
+pub(crate) fn require_unlocked(state: &AppState) -> Result<(), AppError> {
     if state.applock().is_locked() {
         Err(AppError::locked())
     } else {

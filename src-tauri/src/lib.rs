@@ -2,6 +2,8 @@
 
 mod accounts;
 mod applock;
+mod backup;
+mod backup_cmd;
 mod budgets;
 mod error;
 mod lock;
@@ -37,6 +39,7 @@ pub fn run() {
             } else {
                 vault::open_database(app.handle()).ok()
             };
+            backup_cmd::clean_leftovers(app.handle());
             app.manage(AppState::new(db, lock));
             Ok(())
         });
@@ -98,6 +101,11 @@ pub fn run() {
         lock::lock_biometric_set,
         lock::lock_auto_set,
         lock::lock_now,
+        backup_cmd::backup_export,
+        backup_cmd::backup_restore_pick,
+        backup_cmd::backup_restore_prepare,
+        backup_cmd::backup_restore_commit,
+        backup_cmd::backup_restore_cancel,
     ]);
 
     builder

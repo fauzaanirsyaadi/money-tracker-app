@@ -37,6 +37,16 @@ impl Db {
     }
 
     fn init(conn: Connection, key: &DbKey) -> Result<Self, StorageError> {
+        Self::init_to(conn, key, Self::SCHEMA_VERSION)
+    }
+
+    /// Like [`Db::init`] but stops migrating at `target`, so a backup can be
+    /// loaded into the schema it was written with and migrated afterwards.
+    pub(crate) fn init_to(
+        conn: Connection,
+        key: &DbKey,
+        target: u32,
+    ) -> Result<Self, StorageError> {
         // Plain SQLite silently ignores `PRAGMA key` and would write a
         // plaintext file, so prove SQLCipher is linked before touching the key.
         require_cipher(cipher_version(&conn)?)?;
@@ -51,11 +61,16 @@ impl Db {
              PRAGMA secure_delete = ON;",
         )?;
         let db = Self { conn };
-        db.migrate()?;
+        db.migrate_to(target)?;
         Ok(db)
     }
 
-    fn migrate(&self) -> Result<(), StorageError> {
+    /// Applies the migrations after the current version, up to the latest.
+    pub(crate) fn migrate(&self) -> Result<(), StorageError> {
+        self.migrate_to(Self::SCHEMA_VERSION)
+    }
+
+    fn migrate_to(&self, target: u32) -> Result<(), StorageError> {
         let found: u32 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -65,7 +80,13 @@ impl Db {
                 supported: Self::SCHEMA_VERSION,
             });
         }
-        for (index, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
+        let target = target.min(Self::SCHEMA_VERSION);
+        for (index, sql) in MIGRATIONS
+            .iter()
+            .enumerate()
+            .skip(found as usize)
+            .take((target as usize).saturating_sub(found as usize))
+        {
             let version = index + 1;
             self.conn.execute_batch(&format!(
                 "BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;"

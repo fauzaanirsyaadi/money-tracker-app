@@ -3,7 +3,9 @@ use std::marker::PhantomData;
 use serde::de::DeserializeOwned;
 use tauri::{AppHandle, Runtime, plugin::PluginApi};
 
-use crate::{BiometricAvailability, BiometricOutcome, Result};
+use std::path::Path;
+
+use crate::{BiometricAvailability, BiometricOutcome, Error, FileOutcome, Result};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
@@ -32,5 +34,14 @@ impl<R: Runtime> MtPlatform<R> {
         _negative: &str,
     ) -> Result<BiometricOutcome> {
         Ok(BiometricOutcome::Failed)
+    }
+
+    /// There is no Storage Access Framework on desktop builds.
+    pub async fn save_file(&self, _source: &Path, _name: &str) -> Result<FileOutcome> {
+        Err(Error::Unsupported)
+    }
+
+    pub async fn pick_file(&self, _destination: &Path) -> Result<FileOutcome> {
+        Err(Error::Unsupported)
     }
 }

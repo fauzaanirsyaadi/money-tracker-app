@@ -29,6 +29,11 @@ use zeroize::Zeroizing;
 const LOCK_FILE: &str = "lock.json";
 const FORMAT: u32 = 1;
 
+/// Longest the system file picker may hold the app in the background before
+/// the lock applies as usual. Short on purpose: it exists only so choosing a
+/// backup file does not lock the user out of their own export.
+pub const EXTERNAL_UI_MAX: Duration = Duration::from_secs(120);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockError {
     /// No PIN has been set.
@@ -71,6 +76,9 @@ struct Record {
 struct Suspension {
     mono: Instant,
     wall: SystemTime,
+    /// Set when the app left for a system picker that we launched: it may stay
+    /// away until this moment regardless of the auto-lock choice.
+    external_deadline: Option<Instant>,
 }
 
 struct Inner {
@@ -79,6 +87,9 @@ struct Inner {
     locked: bool,
     lockout_until: Option<Instant>,
     suspended: Option<Suspension>,
+    /// End of the window opened by `begin_external_ui`. In memory only: a
+    /// process that dies while the picker is open comes back locked.
+    external_until: Option<Instant>,
 }
 
 pub struct LockService {
@@ -128,6 +139,7 @@ impl LockService {
             locked: false,
             lockout_until: None,
             suspended: None,
+            external_until: None,
         };
         match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Record>(&bytes) {
@@ -319,31 +331,49 @@ impl LockService {
         Ok(())
     }
 
-    /// The app left the foreground. Locks at once when the grace is zero.
+    /// Opens a short window for a system picker we are about to launch. Call
+    /// right before starting it and [`LockService::end_external_ui`] when it
+    /// returns or is cancelled.
+    pub fn begin_external_ui(&self, now: Instant) {
+        self.state().external_until = Some(now + EXTERNAL_UI_MAX);
+    }
+
+    pub fn end_external_ui(&self) {
+        self.state().external_until = None;
+    }
+
+    /// The app left the foreground. Locks at once when the grace is zero,
+    /// unless a system picker we launched is open.
     #[cfg_attr(
         desktop,
         allow(dead_code, reason = "called from the mobile lifecycle hook")
     )]
     pub fn on_suspended(&self, now: Instant, wall: SystemTime) {
         let mut inner = self.state();
-        let Some(record) = inner.record.as_ref() else {
+        let Some(seconds) = inner.record.as_ref().map(|r| r.auto_lock_secs) else {
             return;
         };
         if inner.locked {
             return;
         }
-        let grace = AutoLock::from_seconds(record.auto_lock_secs)
+        let external_deadline = inner.external_until.filter(|until| now < *until);
+        let grace = AutoLock::from_seconds(seconds)
             .unwrap_or(AutoLock::DEFAULT)
             .grace();
-        if grace.is_zero() {
+        if external_deadline.is_none() && grace.is_zero() {
             inner.locked = true;
         } else {
-            inner.suspended = Some(Suspension { mono: now, wall });
+            inner.suspended = Some(Suspension {
+                mono: now,
+                wall,
+                external_deadline,
+            });
         }
     }
 
     /// The app is back. Locks if it was away at least the grace, by either
     /// clock, or if the wall clock went backwards (an attempt to stretch it).
+    /// After a system picker, the only limit is the picker's own deadline.
     #[cfg_attr(
         desktop,
         allow(dead_code, reason = "called from the mobile lifecycle hook")
@@ -356,13 +386,16 @@ impl LockService {
         let Some(away) = inner.suspended.take() else {
             return;
         };
-        let grace = AutoLock::from_seconds(seconds)
-            .unwrap_or(AutoLock::DEFAULT)
-            .grace();
-        let mono = now.saturating_duration_since(away.mono);
-        let expired = match wall.duration_since(away.wall) {
-            Ok(elapsed) => mono >= grace || elapsed >= grace,
-            Err(_) => true,
+        let clock_went_back = wall.duration_since(away.wall).is_err();
+        let expired = if let Some(deadline) = away.external_deadline {
+            now > deadline || clock_went_back
+        } else {
+            let grace = AutoLock::from_seconds(seconds)
+                .unwrap_or(AutoLock::DEFAULT)
+                .grace();
+            let mono = now.saturating_duration_since(away.mono);
+            let elapsed = wall.duration_since(away.wall).unwrap_or_default();
+            clock_went_back || mono >= grace || elapsed >= grace
         };
         if expired {
             inner.locked = true;
@@ -672,6 +705,93 @@ mod tests {
             wall + Duration::from_secs(600),
         );
         assert!(service.is_locked());
+    }
+
+    #[test]
+    fn a_picker_window_keeps_the_app_unlocked_while_it_is_open() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        // Auto-lock is immediate: without the window this would lock at once.
+        let wall = SystemTime::now();
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        assert!(!service.is_locked(), "the picker must not lock the app");
+        service.end_external_ui();
+        service.on_resumed(
+            now + Duration::from_secs(20),
+            wall + Duration::from_secs(20),
+        );
+        assert!(!service.is_locked(), "back from the picker in time");
+    }
+
+    #[test]
+    fn a_picker_window_is_capped() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        let wall = SystemTime::now();
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        let late = EXTERNAL_UI_MAX + Duration::from_secs(1);
+        service.on_resumed(now + late, wall + late);
+        assert!(service.is_locked(), "away longer than the cap");
+    }
+
+    #[test]
+    fn leaving_after_the_picker_closed_locks_again() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.begin_external_ui(now);
+        service.end_external_ui();
+        service.on_suspended(now, SystemTime::now());
+        assert!(
+            service.is_locked(),
+            "the window is gone once the picker returned"
+        );
+    }
+
+    #[test]
+    fn an_expired_window_does_not_protect_a_later_background() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.begin_external_ui(now);
+        // Suspended long after the window ran out (the picker never returned).
+        service.on_suspended(
+            now + EXTERNAL_UI_MAX + Duration::from_secs(5),
+            SystemTime::now(),
+        );
+        assert!(service.is_locked());
+    }
+
+    #[test]
+    fn winding_the_clock_back_during_a_picker_still_locks() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        let wall = SystemTime::now();
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        service.on_resumed(
+            now + Duration::from_secs(2),
+            wall - Duration::from_secs(600),
+        );
+        assert!(service.is_locked());
+    }
+
+    #[test]
+    fn the_picker_window_does_not_survive_a_new_process() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.begin_external_ui(now);
+        // Process death: a new service starts locked and has no window.
+        let again = LockService::load(&dir.0, now);
+        assert!(again.is_locked());
+        again.on_suspended(now, SystemTime::now());
+        assert!(again.is_locked());
     }
 
     #[test]

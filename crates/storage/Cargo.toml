@@ -11,6 +11,8 @@ mt-core = { path = "../core" }
 # SQLite + SQLCipher compiled from source; OpenSSL is vendored because Android
 # has no system OpenSSL. MIT, actively maintained (rusqlite org).
 rusqlite = { version = "0.40", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
+# Logical backup lines. MIT OR Apache-2.0, widely used (already in the app's tree).
+serde_json = "1"
 # Wipes key material from memory. Apache-2.0 OR MIT, RustCrypto, maintained.
 zeroize = "1"
 

@@ -1,0 +1,342 @@
+#!/usr/bin/env node
+// End-to-end backup and restore on a device or emulator, through the real
+// system file pickers:
+//
+//   seed data -> set PIN -> export (picker) -> check the file ->
+//   uninstall -> reinstall -> restore (picker) -> compare everything.
+//
+//   node scripts/android_backup_e2e.mjs [--apk PATH] [--serial ID]
+//
+// Needs a debug build (the DevTools channel reads and asserts state; the
+// pickers are driven with real input events). Uses the system "Files" UI, so
+// selectors are looked up by text and retried.
+
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PACKAGE = "com.moneytracker.app";
+const ACTIVITY = `${PACKAGE}/.MainActivity`;
+const PORT = 9222;
+const PASSPHRASE = "kopi susu gula aren enak";
+const FILE = "money-tracker-e2e.mtbak";
+const PIN = "493017";
+
+const args = process.argv.slice(2);
+const option = (name) => {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+if (!sdk) throw new Error("set ANDROID_HOME");
+const adbBin = path.join(sdk, "platform-tools", "adb");
+const serial = option("--serial");
+const apk =
+  option("--apk") ??
+  path.join(root, "src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk");
+const adb = (...a) =>
+  execFileSync(adbBin, [...(serial ? ["-s", serial] : []), ...a], { encoding: "utf8", maxBuffer: 64 << 20 }).trim();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let checks = 0;
+function check(name, ok, detail = "") {
+  checks += 1;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? `  -> ${detail}` : ""}`);
+  if (!ok) throw new Error(`check failed: ${name}`);
+}
+
+/** Polls every 500 ms for at most `ms` of *polling* (counted in tries, not wall clock). */
+async function until(what, fn, ms = 60_000) {
+  const tries = Math.ceil(ms / 500);
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    try {
+      const value = await fn();
+      if (value) return value;
+    } catch {
+      // not ready
+    }
+    await sleep(500);
+  }
+  throw new Error(`timeout waiting for ${what}`);
+}
+
+// --- DevTools -----------------------------------------------------------
+
+let ws;
+let nextId = 0;
+const pending = new Map();
+
+async function connect() {
+  const pid = adb("shell", "pidof", PACKAGE);
+  adb("forward", `tcp:${PORT}`, `localabstract:webview_devtools_remote_${pid}`);
+  const targets = await (await fetch(`http://localhost:${PORT}/json`)).json();
+  const target = targets.find((t) => t.url?.includes("tauri.localhost")) ?? targets[0];
+  try {
+    ws?.close();
+  } catch {
+    // already closed
+  }
+  ws = new WebSocket(target.webSocketDebuggerUrl);
+  ws.onmessage = (event) => {
+    const m = JSON.parse(event.data);
+    if (m.id && pending.has(m.id)) {
+      pending.get(m.id)(m);
+      pending.delete(m.id);
+    }
+  };
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
+  });
+}
+
+function evaluate(expression) {
+  return new Promise((resolve, reject) => {
+    const id = ++nextId;
+    pending.set(id, (m) =>
+      m.result?.exceptionDetails
+        ? reject(new Error(m.result.exceptionDetails.exception?.description ?? "page exception"))
+        : resolve(m.result?.result?.value),
+    );
+    ws.send(
+      JSON.stringify({ id, method: "Runtime.evaluate", params: { expression, awaitPromise: true, returnByValue: true } }),
+    );
+  });
+}
+
+/** Invokes a command; resolves `{ok: value}` or `{code}` so errors can be asserted. */
+const call = (command, payload = {}) =>
+  evaluate(
+    `window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(payload)}).then((v) => ({ ok: v }), (e) => ({ code: e?.code ?? 'error' }))`,
+  );
+
+async function must(command, payload) {
+  const r = await call(command, payload);
+  if (r.code) throw new Error(`${command} failed: ${r.code}`);
+  return r.ok;
+}
+
+async function startApp() {
+  adb("shell", "am", "force-stop", PACKAGE);
+  adb("shell", "am", "start", "-n", ACTIVITY);
+  await until("the web view", async () => {
+    await connect();
+    return evaluate("typeof window.__TAURI_INTERNALS__ !== 'undefined'");
+  });
+}
+
+// --- System picker ------------------------------------------------------
+
+function dumpNodes() {
+  adb("shell", "uiautomator", "dump", "/sdcard/mt-picker.xml");
+  const xml = adb("shell", "cat", "/sdcard/mt-picker.xml");
+  const nodes = [];
+  for (const m of xml.matchAll(/<node[^>]*?text="([^"]*)"[^>]*?resource-id="([^"]*)"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g)) {
+    nodes.push({
+      text: m[1],
+      id: m[2],
+      x: Math.round((Number(m[3]) + Number(m[5])) / 2),
+      y: Math.round((Number(m[4]) + Number(m[6])) / 2),
+    });
+  }
+  return nodes;
+}
+
+function topActivity() {
+  return adb("shell", "dumpsys", "activity", "activities").match(/topResumedActivity=.*/)?.[0] ?? "";
+}
+
+/** Taps the first node whose text matches, dismissing "isn't responding" dialogs on the way. */
+async function tapWhen(label, predicate, ms = 60_000) {
+  await until(label, () => {
+    let nodes;
+    try {
+      nodes = dumpNodes();
+    } catch {
+      return false;
+    }
+    const wait = nodes.find((n) => n.id === "android:id/aerr_wait");
+    if (wait) {
+      adb("shell", "input", "tap", String(wait.x), String(wait.y));
+      return false;
+    }
+    const hit = nodes.find(predicate);
+    if (!hit) return false;
+    adb("shell", "input", "tap", String(hit.x), String(hit.y));
+    return true;
+  }, ms);
+}
+
+const inPicker = () => /documentsui/.test(topActivity());
+
+// --- Snapshot -----------------------------------------------------------
+
+async function snapshot() {
+  const accounts = (await must("accounts_list", { includeArchived: true })).map((a) => ({
+    name: a.name,
+    balance: a.balanceMinor,
+    archived: a.archived,
+  }));
+  const rows = [];
+  let cursor = null;
+  do {
+    const page = await must("transactions_list", { filter: {}, cursor, limit: 100 });
+    for (const t of page.items) {
+      rows.push([t.accountName, t.categoryName, t.kind, t.amountMinor, t.note, t.occurredOn]);
+    }
+    cursor = page.next;
+  } while (cursor);
+  const categories = (await must("categories_list", { includeArchived: true })).length;
+  return { accounts, rows, categories };
+}
+
+// --- Flow ---------------------------------------------------------------
+
+async function seed() {
+  const dompet = await must("account_create", { input: { name: "Dompet", kind: "cash", openingBalanceMinor: "1500000" } });
+  const tabungan = await must("account_create", { input: { name: "Tabungan", kind: "bank", openingBalanceMinor: "2500000" } });
+  const categories = await must("categories_list", { includeArchived: false });
+  const expense = categories.find((c) => c.kind === "expense").id;
+  const income = categories.find((c) => c.kind === "income").id;
+  for (let i = 0; i < 40; i += 1) {
+    await must("transaction_create", {
+      input: {
+        accountId: i % 2 === 0 ? dompet.id : tabungan.id,
+        categoryId: i % 5 === 0 ? income : expense,
+        kind: i % 5 === 0 ? "income" : "expense",
+        amountMinor: String(1000 + i * 137),
+        note: `catatan ${i} "uji" 🍛`,
+        occurredOn: `2026-10-${String(1 + (i % 28)).padStart(2, "0")}`,
+      },
+    });
+  }
+  await must("transfer_create", {
+    input: { fromAccountId: tabungan.id, toAccountId: dompet.id, amountMinor: "250000", note: "tarik tunai", occurredOn: "2026-10-05" },
+  });
+}
+
+try {
+  try {
+    adb("uninstall", PACKAGE);
+  } catch {
+    // not installed
+  }
+  adb("install", apk);
+  await startApp();
+  check("fresh install starts", true);
+
+  await seed();
+  const before = await snapshot();
+  check("seeded 2 accounts and 41 rows", before.accounts.length === 2 && before.rows.length === 42, `${before.rows.length} rows`);
+
+  const status = await must("lock_setup", { pin: PIN });
+  check("a PIN is set (auto-lock: immediately)", status.configured && !status.locked);
+
+  // A weak passphrase is refused before the picker opens.
+  const weak = await call("backup_export", { passphrase: "pendek", name: FILE });
+  check("a short passphrase is refused", weak.code === "weak_passphrase", weak.code);
+  check("no picker opened for it", !inPicker());
+
+  // Export through the picker. The app is backgrounded by it and must stay unlocked.
+  const exporting = call("backup_export", { passphrase: PASSPHRASE, name: FILE });
+  await until("save picker", async () => inPicker(), 240_000);
+  check("the system save picker is shown", true);
+  // The picker's confirm button is the dialog's positive button, labelled SAVE.
+  await tapWhen("Save button", (n) => n.id === "android:id/button1" && /^save$/i.test(n.text));
+  const exported = await exporting;
+  check("export reports saved", exported.ok?.saved === true, JSON.stringify(exported).slice(0, 120));
+  await until("app in front", async () => topActivity().includes(PACKAGE));
+  check("the picker did not lock the app", (await must("lock_status")).locked === false);
+
+  // The file on the device.
+  const dir = mkdtempSync(path.join(tmpdir(), "mt-e2e-"));
+  const local = path.join(dir, FILE);
+  adb("pull", `/sdcard/Download/${FILE}`, local);
+  const bytes = readFileSync(local);
+  check("the file starts with the container magic", bytes.subarray(0, 4).toString() === "MTBK");
+  check("the file is not trivially small", bytes.length > 500, `${bytes.length} bytes`);
+  const text = bytes.toString("latin1");
+  check("the file contains no plaintext", !["Dompet", "Tabungan", "catatan", "money-tracker-logical"].some((s) => text.includes(s)));
+
+  // Cancelling the open picker changes nothing.
+  const pickingCancel = call("backup_restore_pick");
+  await until("open picker", async () => inPicker(), 240_000);
+  adb("shell", "input", "keyevent", "KEYCODE_BACK");
+  const cancelled = await pickingCancel;
+  check("cancelling the picker resolves false", cancelled.ok === false, JSON.stringify(cancelled));
+  await until("app in front", async () => topActivity().includes(PACKAGE));
+  check("the app is still unlocked after the cancel", (await must("lock_status")).locked === false);
+
+  // A new installation.
+  adb("uninstall", PACKAGE);
+  adb("install", apk);
+  await startApp();
+  const empty = await snapshot();
+  check("the reinstalled app has no accounts", empty.accounts.length === 0 && empty.rows.length === 0);
+
+  // Restore: pick the file in the system picker.
+  const picking = call("backup_restore_pick");
+  await until("open picker", async () => inPicker(), 240_000);
+  await tapWhen("the backup file", (n) => n.text === FILE, 90_000);
+  const picked = await picking;
+  check("the file was chosen", picked.ok === true, JSON.stringify(picked));
+  await until("app in front", async () => topActivity().includes(PACKAGE));
+
+  const wrong = await call("backup_restore_prepare", { passphrase: "bukan frasa sandi yang benar" });
+  check("a wrong passphrase is reported", wrong.code === "wrong_passphrase", wrong.code);
+  check("nothing changed after the wrong passphrase", (await snapshot()).accounts.length === 0);
+
+  const preview = await must("backup_restore_prepare", { passphrase: PASSPHRASE });
+  check("the preview shows the backup contents", preview.backup.accounts === 2 && preview.backup.transactions === 42, JSON.stringify(preview.backup));
+  check("the preview shows what will be replaced", preview.current.accounts === 0);
+  check("live data is untouched before confirmation", (await snapshot()).accounts.length === 0);
+
+  const committed = await must("backup_restore_commit");
+  check("restore reports the counts", committed.accounts === 2 && committed.transactions === 42);
+
+  const after = await snapshot();
+  check("accounts and balances are identical", JSON.stringify(after.accounts) === JSON.stringify(before.accounts));
+  check("every transaction is identical", JSON.stringify(after.rows) === JSON.stringify(before.rows), `${after.rows.length} rows`);
+  check("categories are identical", after.categories === before.categories);
+  check("the PIN did not travel with the backup", (await must("lock_status")).configured === false);
+
+  // Restore over existing data replaces it.
+  const extra = (await must("accounts_list", { includeArchived: false }))[0];
+  const cats = await must("categories_list", { includeArchived: false });
+  await must("transaction_create", {
+    input: { accountId: extra.id, categoryId: cats.find((c) => c.kind === "expense").id, kind: "expense", amountMinor: "999", note: "tambahan", occurredOn: "2026-10-14" },
+  });
+  check("an extra row exists before the second restore", (await snapshot()).rows.length === 43);
+  const picking2 = call("backup_restore_pick");
+  await until("open picker", async () => inPicker(), 240_000);
+  await tapWhen("the backup file", (n) => n.text === FILE, 90_000);
+  await picking2;
+  await until("app in front", async () => topActivity().includes(PACKAGE));
+  const preview2 = await must("backup_restore_prepare", { passphrase: PASSPHRASE });
+  check("the second preview shows the current data", preview2.current.transactions === 43);
+  await must("backup_restore_commit");
+  const again = await snapshot();
+  check("restoring over existing data replaces it", JSON.stringify(again) === JSON.stringify(before));
+
+  // The result survives a restart (the swap persisted and the key matches).
+  await startApp();
+  const restarted = await snapshot();
+  check("data is still there after a restart", JSON.stringify(restarted) === JSON.stringify(before));
+
+  console.log(`\nBACKUP E2E OK (${checks} checks)`);
+  process.exitCode = 0;
+} catch (error) {
+  console.error(`\nBACKUP E2E FAILED: ${error.message}`);
+  process.exitCode = 1;
+} finally {
+  try {
+    ws?.close();
+    adb("forward", "--remove", `tcp:${PORT}`);
+  } catch {
+    // best effort
+  }
+  process.exit(process.exitCode ?? 0);
+}

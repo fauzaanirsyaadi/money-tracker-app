@@ -39,6 +39,15 @@ pub enum BiometricOutcome {
     Failed,
 }
 
+/// Result of a system file picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOutcome {
+    /// The file was written to, or read from, the chosen location.
+    Done,
+    /// The user dismissed the picker.
+    Cancelled,
+}
+
 pub trait MtPlatformExt<R: Runtime> {
     fn mt_platform(&self) -> &MtPlatform<R>;
 }

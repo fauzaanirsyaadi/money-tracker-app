@@ -16,7 +16,7 @@ use tauri_plugin_mt_keystore::MtKeystoreExt;
 use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "db.key";
-const DB_FILE: &str = "money.db";
+const DB_FILE: &str = crate::backup::LIVE_DB;
 
 /// Serialises key creation and loading. Tauri runs commands on several
 /// threads; without this, two first-run callers could each generate a key and
@@ -53,10 +53,32 @@ impl From<tauri_plugin_mt_keystore::Error> for VaultError {
     }
 }
 
-/// Loads (or on first run creates) the key and opens the database.
-pub fn open_database<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultError> {
+/// The app's private data directory (created if needed).
+pub fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, VaultError> {
     let dir = app.path().app_data_dir().map_err(|_| VaultError::Io)?;
     fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Loads the key of an existing installation. Never creates one: a restore
+/// must reuse the key the live database already has.
+pub fn load_existing_key<R: Runtime>(app: &AppHandle<R>) -> Result<DbKey, VaultError> {
+    let dir = data_dir(app)?;
+    let keystore = app.mt_keystore();
+    let _guard = KEY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    if !dir.join(KEY_FILE).exists() {
+        return Err(VaultError::KeyMissing);
+    }
+    load_or_create_key(
+        &dir,
+        |plain| Ok(keystore.wrap(plain)?),
+        |blob| Ok(keystore.unwrap(blob)?),
+    )
+}
+
+/// Loads (or on first run creates) the key and opens the database.
+pub fn open_database<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultError> {
+    let dir = data_dir(app)?;
     let keystore = app.mt_keystore();
     // Held across key load/creation *and* open, so a second caller sees the
     // finished database rather than racing the first run.
@@ -66,6 +88,8 @@ pub fn open_database<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultError> {
         |plain| Ok(keystore.wrap(plain)?),
         |blob| Ok(keystore.unwrap(blob)?),
     )?;
+    // A restore interrupted by a crash is resolved before anything opens the file.
+    crate::backup::recover_interrupted(&dir, |path| Db::open(path, &key).is_ok());
     Ok(Db::open(&dir.join(DB_FILE), &key)?)
 }
 

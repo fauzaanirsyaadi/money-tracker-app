@@ -3,6 +3,7 @@
 //! Knows nothing about Tauri or the UI. Depends on `mt-core` only.
 
 mod accounts;
+mod backup;
 mod budgets;
 mod categories;
 mod db;
@@ -12,6 +13,7 @@ mod reports;
 mod transactions;
 
 pub use accounts::Account;
+pub use backup::{LogicalSummary, TABLE_ORDER};
 pub use budgets::BudgetRecord;
 pub use categories::Category;
 pub use db::{Db, DbKey};

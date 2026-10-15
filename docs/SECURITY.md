@@ -34,6 +34,15 @@ Konsekuensi yang harus dipahami:
 - Karena bukan kriptografis, **PIN lupa tidak punya jalan pemulihan di dalam aplikasi**. Jalannya adalah **backup terenkripsi** (langkah B) dan memulihkannya pada instalasi bersih. Sebelum backup tersedia, aplikasi memperingatkan pengguna saat mengatur PIN.
 - Hasil biometrik adalah keputusan boolean dari sistem; aplikasi tidak memakai `CryptoObject`. Hasilnya dikirim dari kode native langsung ke Rust, sehingga skrip di WebView tidak dapat memalsukannya (hanya dapat *meminta* prompt).
 
+## Backup terenkripsi
+
+- **Isi:** ekspor *logis* (baris JSON per baris tabel, bukan berkas SQLite), sehingga tidak bergantung pada kunci perangkat dan dapat dimigrasikan antarversi skema. **Tidak** memuat PIN, `lock.json`, `db.key`, maupun material Keystore. Saat restore, data ditulis ulang dengan kunci basis data perangkat tujuan.
+- **Frasa sandi:** minimal 12 karakter (maksimal 128), bukan satu karakter berulang. **Tidak ada pemulihan frasa sandi**; UI menyatakannya dan meminta persetujuan eksplisit sebelum membuat cadangan.
+- **Penyimpanan:** lewat Storage Access Framework (picker sistem). Kode Kotlin hanya menyalin berkas yang **sudah terenkripsi** antara URI pilihan pengguna dan berkas sementara di cache privat; jalur dipastikan berada di dalam cache. Rust tidak memakai `unsafe`/fd mentah.
+- **Restore tidak menyentuh data aktif sebelum lolos validasi:** (1) berkas dibuka dan potongan pertama diautentikasi (frasa sandi salah terdeteksi di sini); (2) isi dibangun ke basis data **terpisah** (`restore-staged.db`) pada skema milik cadangan lalu dimigrasikan; (3) `integrity_check`, `foreign_key_check`, jumlah baris per tabel, dan saldo per rekening dibandingkan dengan catatan di cadangan; (4) pengguna melihat ringkasan dan harus mencentang konfirmasi penggantian; (5) penukaran dengan dua `rename`, basis data lama disimpan sebagai `money.db.old` sampai yang baru terbuka dan terverifikasi ulang. Bila proses mati di tengah, saat start berikutnya `money.db.old` dikembalikan (bila `money.db` hilang) atau dibuang (bila yang baru terbaca).
+- **Tenggang picker:** picker sistem menjeda aplikasi. Tenggang kunci dibuka **hanya** sejak picker diluncurkan sampai ia kembali atau dibatalkan, dibatasi 2 menit, tidak disimpan di disk, sehingga proses yang mati saat picker terbuka kembali **terkunci**. Menjauh dari aplikasi lebih lama dari batas itu, atau memundurkan jam, mengunci.
+- **Batas:** backup melindungi isi, bukan keberadaannya: ukuran berkas membocorkan perkiraan jumlah transaksi. Pengguna yang tahu frasa sandi dapat membuat cadangan berisi data sembarang; restore tetap menolaknya lewat batasan skema, validasi, dan pemeriksaan saldo, tetapi tidak dapat membedakan data "benar" dari data palsu yang konsisten.
+
 ## Parameter kriptografi
 
 | Hal | Nilai |
@@ -41,7 +50,7 @@ Konsekuensi yang harus dipahami:
 | Hash PIN | Argon2id v1.3, memori **19 MiB (19 456 KiB)**, iterasi **t = 2**, paralelisme **p = 1**, keluaran 32 byte, salt acak 16 byte; disimpan sebagai string PHC di `lock.json`. Ini minimum OWASP. Waktu di perangkat kelas bawah belum diukur (Fase 8); bila terlalu lambat saat buka-kunci, turunkan memori atau t, dan ingat PIN 6 digit tetap lemah terhadap penyerang offline |
 | Perbandingan | Verifikasi konstan-waktu (crate `argon2`/`password-hash`) |
 | Kunci basis data | 32 byte acak (`getrandom`), dibungkus AES-256-GCM oleh kunci Keystore yang tidak dapat diekspor (`setUnlockedDeviceRequired(true)`), dipasang sebagai `PRAGMA key = "x'…'"` |
-| Backup (langkah B) | Argon2id dari frasa sandi + XChaCha20-Poly1305 — parameter akan dicatat di sini setelah ditetapkan |
+| Backup | Argon2id memori **64 MiB**, **t = 3**, **p = 1**, salt 16 byte acak; kunci 32 byte. Enkripsi XChaCha20-Poly1305 dalam konstruksi STREAM (BE32): potongan plaintext 64 KiB, prefiks nonce 19 byte acak, header 57 byte ikut diautentikasi pada setiap potongan, potongan terakhir ditandai sehingga pemotongan, penyusunan ulang, dan duplikasi terdeteksi. Batas pembacaan: m 64 KiB–256 MiB, t ≤ 10, p ≤ 4 (berkas rekayasa tidak dapat memaksa kerja berlebihan) |
 
 ## Perilaku jeda PIN setelah reboot
 

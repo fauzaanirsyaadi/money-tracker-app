@@ -53,18 +53,19 @@ function check(name, ok, detail = "") {
   if (!ok) throw new Error(`check failed: ${name}`);
 }
 
+/** Polls every 500 ms for at most `ms` of *polling* (counted in tries, so a stalled host cannot trip it). */
 async function until(what, fn, ms = 60_000) {
-  const start = Date.now();
-  for (;;) {
+  const tries = Math.ceil(ms / 500);
+  for (let attempt = 0; attempt < tries; attempt += 1) {
     try {
       const value = await fn();
       if (value) return value;
     } catch {
       // not ready yet
     }
-    if (Date.now() - start > ms) throw new Error(`timeout waiting for ${what}`);
     await sleep(500);
   }
+  throw new Error(`timeout waiting for ${what}`);
 }
 
 // --- DevTools channel ------------------------------------------------------

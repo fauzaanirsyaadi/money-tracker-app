@@ -853,3 +853,56 @@ Urutan Fase 7 yang disepakati: **A** kunci aplikasi + `FLAG_SECURE`, **B** backu
 | Jeda PIN setelah reboot | Hitungan bertahan; jeda dimulai penuh lagi tiap proses baru (SECURITY.md) |
 | Aturan async | Ditambahkan ke CLAUDE.md |
 | Parameter Argon2id | Dicatat di SECURITY.md (19 MiB, t=2, p=1); pengukuran perangkat kelas bawah menunggu Fase 8 |
+
+---
+
+## 24. Fase 7, langkah B: backup dan restore terenkripsi (2026-10-15)
+
+Rancangan keamanan ada di [SECURITY.md](SECURITY.md) (bagian "Backup terenkripsi"). Ringkas teknis:
+
+| Lapisan | Isi |
+|---|---|
+| `mt-backup` (crate baru, tanpa I/O data) | Wadah terenkripsi: Argon2id + XChaCha20-Poly1305 STREAM-BE32, `BackupWriter`/`BackupReader` di atas `Write`/`Read`, memori konstan (potongan 64 KiB). Kebijakan frasa sandi |
+| `mt-storage::backup` | `export_logical` (JSON per baris, satu snapshot baca, `ORDER BY` deterministik) dan `restore_logical` (basis data baru, skema milik cadangan lalu dimigrasikan, validasi lengkap). Tes penjaga: tabel baru wajib masuk `TABLE_ORDER` |
+| `src-tauri::backup` | `write_backup`, `stage_restore`, `swap_in`/`finish_swap`/`undo_swap`, `recover_interrupted` (dipanggil sebelum membuka DB saat start) |
+| `src-tauri::backup_cmd` | `backup_export`, `backup_restore_pick`, `backup_restore_prepare` (dapat diulang bila frasa sandi salah), `backup_restore_commit`, `backup_restore_cancel`. Sesi restore dihapus bersama berkasnya saat aplikasi terkunci |
+| `mt-platform` | `saveFile` / `pickFile` (SAF, `ACTION_CREATE_DOCUMENT` / `ACTION_OPEN_DOCUMENT`); Kotlin hanya menyalin ciphertext antara URI dan cache privat |
+| `applock` | `begin_external_ui` / `end_external_ui`: jendela sempit (maks. 2 menit, hanya di memori) agar picker tidak mengunci aplikasi |
+
+### Hasil uji
+
+| Uji | Hasil |
+|---|---|
+| `mt-backup` (14) | round-trip kosong/kecil/tepat satu potongan/banyak potongan; frasa sandi salah; membalik satu byte di 14 posisi; pemotongan di mana saja; pelepasan potongan terakhir pada batas; penyusunan ulang/duplikasi; data tambahan; versi tak dikenal; parameter rekayasa; kebijakan frasa sandi |
+| `mt-storage::backup` (8) | restore identik (ekspor ulang menghasilkan **byte yang sama**); kategori bawaan terganti; basis data kosong; skema versi lama dimigrasikan; 11 jenis berkas rusak ditolak **tanpa meninggalkan berkas**; skema terlalu baru; tidak menimpa berkas yang ada |
+| `src-tauri::backup` (11 + 1 besar) | ekspor→restore: jumlah dan saldo per rekening identik; tanpa plaintext; frasa sandi lemah ditolak sebelum menulis; klasifikasi kegagalan; wadah sah dengan isi sampah ditolak; swap, undo, kegagalan di tiap langkah menyisakan DB lama, pemulihan di dua titik crash |
+| `applock` (+6) | picker tidak mengunci; dibatasi; menutup setelah picker kembali; jendela kedaluwarsa tidak melindungi; jam mundur; tidak bertahan setelah proses baru |
+| UI | 4 tes `backup.test.ts` (aturan frasa sandi, nama berkas, pesan galat) |
+
+### Uji emulator (`scripts/android_backup_e2e.mjs`, 29 pemeriksaan, picker sistem sungguhan)
+
+Data diisi (2 rekening, 40 transaksi, 1 transfer) → PIN dipasang (kunci otomatis: segera) → frasa sandi pendek ditolak tanpa membuka picker → ekspor lewat picker "Simpan" **tanpa mengunci aplikasi** → berkas ditarik: ada magic `MTBK`, tanpa plaintext → membatalkan picker memberi `false` → uninstall + pasang ulang (kunci Keystore baru) → pilih berkas → frasa sandi salah dilaporkan dan tidak mengubah apa pun → pratinjau → konfirmasi → **rekening, saldo, 42 transaksi, dan kategori identik**; PIN tidak ikut → tambah satu transaksi lalu restore lagi: data diganti, identik dengan semula → proses dimulai ulang: data tetap ada.
+
+`android_smoke.mjs --lock` setelah langkah B: 34 pemeriksaan lulus.
+
+### Skala: 100 000 transaksi (rilis, macOS arm64, parameter produksi m = 64 MiB, t = 3)
+
+| Langkah | Waktu |
+|---|---|
+| Impor dump teks ke DB baru (termasuk membangun indeks dan semua pemeriksaan) | 3,9 dtk |
+| Ekspor + enkripsi | **0,75 dtk** |
+| Ukuran berkas | **8,0 MB** |
+| Dekripsi + restore + verifikasi | **1,9 dtk** |
+| Puncak memori proses | **102 MB** RSS (footprint 92 MB), didominasi 64 MiB Argon2 + dump teks uji di memori; **tidak tumbuh dengan ukuran DB** |
+
+Angka perangkat kelas bawah menunggu Fase 8.
+
+### Temuan selama verifikasi
+
+| Temuan | Tindakan |
+|---|---|
+| Kerusakan di tengah berkas awalnya dilaporkan sebagai "frasa sandi salah" bila seluruh isi muat satu potongan | Hanya potongan pertama yang membedakan; kerusakan sesudahnya dilaporkan sebagai **cadangan rusak**. Tes memakai banyak potongan |
+| Hitungan baris setelah migrasi naik karena migrasi menyemai data baru | Jumlah baris dibandingkan **sebelum** migrasi naik; saldo sesudahnya |
+| Jam dinding host melompat berjam-jam di antara beberapa pemanggilan (host/sandbox tertahan), tampak seperti `adb install` macet 15 menit | Bukan galat aplikasi; batas waktu skrip E2E dilonggarkan (240 dtk per picker) |
+| Satu ANR `com.moneytracker.app` saat mengetik di smoke test, ketika load host 8–12 | Jejak: thread utama menunggu `ThreadedRenderer.syncAndDrawFrame` (render thread/GPU emulator), bukan kode aplikasi, sama dengan temuan Fase 6. Lulus pada ulangan dengan host lebih tenang. Perlu dipantau di perangkat nyata (Fase 8) |
+| Emulator menjadi lamban setelah uji reboot (ANR Pixel Launcher/System UI) | Emulator dimulai ulang dingin; tidak terkait aplikasi |

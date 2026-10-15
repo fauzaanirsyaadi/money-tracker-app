@@ -26,6 +26,10 @@ pub enum StorageError {
     CurrencyMismatch,
     /// A stored value could not be read back (unknown code, out-of-range amount).
     InvalidData,
+    /// A backup's content is malformed, inconsistent or violates a schema rule.
+    BackupInvalid,
+    /// A file could not be read or written.
+    Io,
     /// Any other SQLite failure, identified by its extended result code only.
     Sqlite { code: i32 },
 }
@@ -49,6 +53,8 @@ impl fmt::Display for StorageError {
             Self::TransferLeg => f.write_str("not allowed on a transfer leg"),
             Self::CurrencyMismatch => f.write_str("currency mismatch"),
             Self::InvalidData => f.write_str("invalid stored data"),
+            Self::BackupInvalid => f.write_str("backup content is invalid"),
+            Self::Io => f.write_str("file access failed"),
             Self::Sqlite { code } => write!(f, "sqlite error {code}"),
         }
     }

@@ -22,6 +22,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 mt-core = { path = "../crates/core" }
 mt-storage = { path = "../crates/storage" }
+mt-backup = { path = "../crates/backup" }
 tauri-plugin-mt-keystore = { path = "plugins/mt-keystore" }
 tauri-plugin-mt-platform = { path = "plugins/mt-platform" }
 serde = { version = "1", features = ["derive"] }

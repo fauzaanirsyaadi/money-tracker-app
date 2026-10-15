@@ -24,8 +24,18 @@ pub enum ErrorCode {
     WrongPin,
     /// Too many wrong PINs in a row; try again later.
     LockedOut,
-    /// The user dismissed the biometric prompt.
+    /// The user dismissed a prompt or picker.
     Cancelled,
+    /// The backup passphrase is too weak to use.
+    WeakPassphrase,
+    /// Wrong passphrase for this backup (or it was altered).
+    WrongPassphrase,
+    /// The chosen file is not a Money Tracker backup.
+    NotABackup,
+    /// The backup comes from a newer version of the app.
+    UnsupportedBackup,
+    /// The backup is incomplete or inconsistent.
+    BackupDamaged,
     Internal,
 }
 
