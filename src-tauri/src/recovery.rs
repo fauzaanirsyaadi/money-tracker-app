@@ -36,9 +36,17 @@ pub fn initialize(app: &AppHandle, state: &AppState) {
             return;
         }
     };
-    if let Some(reason) = vault::preflight(&dir) {
-        state.set_problem(Some(StorageProblem::Recovery(reason)));
-        return;
+    match vault::preflight(&dir) {
+        // Storage cannot be read right now: "try again", never recovery.
+        Err(err) => {
+            state.set_problem(Some(problem_of(&err)));
+            return;
+        }
+        Ok(Some(reason)) => {
+            state.set_problem(Some(StorageProblem::Recovery(reason)));
+            return;
+        }
+        Ok(None) => {}
     }
     if state.applock().is_locked() {
         // Opened by the unlock, which reports its own problems.

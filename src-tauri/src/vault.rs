@@ -49,7 +49,7 @@ pub enum RecoveryReason {
     DatabaseUnreadable,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultError {
     Io,
     /// Data is lost or unreadable: needs the recovery screen.
@@ -118,16 +118,31 @@ pub fn classify(state: DirState) -> Startup {
     }
 }
 
-fn non_empty(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
+/// `Some(metadata)` when the file exists, `None` only when it is definitely
+/// absent. Any other failure (permission, I/O, a path component that is not a
+/// directory) is "cannot read storage right now": `Path::exists()` would call
+/// all of those "absent" and let a hiccup masquerade as lost data.
+fn metadata_of(path: &Path) -> Result<Option<fs::Metadata>, VaultError> {
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(VaultError::Unavailable),
+    }
 }
 
-pub fn inspect(dir: &Path) -> DirState {
-    DirState {
-        db: non_empty(&dir.join(DB_FILE)) || dir.join(OLD_DB_FILE).exists(),
-        key: dir.join(KEY_FILE).exists(),
-        lock: dir.join(LOCK_FILE).exists(),
-    }
+fn present(path: &Path) -> Result<bool, VaultError> {
+    Ok(metadata_of(path)?.is_some())
+}
+
+/// What exists in the data directory. Fails (as "unavailable", never as
+/// recovery) when any of the files cannot be examined.
+pub fn inspect(dir: &Path) -> Result<DirState, VaultError> {
+    let live_has_data = metadata_of(&dir.join(DB_FILE))?.is_some_and(|meta| meta.len() > 0);
+    Ok(DirState {
+        db: live_has_data || present(&dir.join(OLD_DB_FILE))?,
+        key: present(&dir.join(KEY_FILE))?,
+        lock: present(&dir.join(LOCK_FILE))?,
+    })
 }
 
 /// The app's private data directory (created if needed).
@@ -137,12 +152,13 @@ pub fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, VaultError> {
     Ok(dir)
 }
 
-/// Whether this installation's files call for recovery, without opening anything.
-pub fn preflight(dir: &Path) -> Option<RecoveryReason> {
-    match classify(inspect(dir)) {
+/// Whether this installation's files call for recovery, without opening
+/// anything. `Err` means the files could not be examined: a transient state.
+pub fn preflight(dir: &Path) -> Result<Option<RecoveryReason>, VaultError> {
+    Ok(match classify(inspect(dir)?) {
         Startup::NeedsRecovery(reason) => Some(reason),
         Startup::FirstRun | Startup::Ready => None,
-    }
+    })
 }
 
 /// Loads the key of an existing installation. Never creates one: a restore
@@ -181,7 +197,7 @@ fn open_in_dir(
     wrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>,
     unwrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>,
 ) -> Result<Db, VaultError> {
-    let first_run = match classify(inspect(dir)) {
+    let first_run = match classify(inspect(dir)?) {
         Startup::NeedsRecovery(reason) => return Err(VaultError::Recovery(reason)),
         Startup::FirstRun => true,
         Startup::Ready => false,
@@ -673,8 +689,56 @@ mod tests {
     #[test]
     fn preflight_reports_the_reason_without_opening_anything() {
         let dir = TempDir::new("preflight");
-        assert_eq!(preflight(&dir.0), None, "first run");
+        assert_eq!(preflight(&dir.0), Ok(None), "first run");
         arrange(&dir.0, false, true, false);
-        assert_eq!(preflight(&dir.0), Some(RecoveryReason::DatabaseMissing));
+        assert_eq!(preflight(&dir.0), Ok(Some(RecoveryReason::DatabaseMissing)));
+    }
+
+    // --- unreadable storage is not lost data (review item F4) --------------------
+
+    #[test]
+    fn a_path_that_cannot_be_examined_is_unavailable_not_absent() {
+        // The data "directory" is a file: statting a child fails with "not a
+        // directory", which is not "not found" and must not read as lost data.
+        let dir = TempDir::new("notadir");
+        let file = dir.0.join("not-a-directory");
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(inspect(&file).err(), Some(VaultError::Unavailable));
+        assert_eq!(preflight(&file).err(), Some(VaultError::Unavailable));
+        assert_eq!(open(&file).err(), Some(VaultError::Unavailable));
+        assert_eq!(snapshot(&dir.0).len(), 1, "nothing was created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_error_is_unavailable_and_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new("denied");
+        arrange(&dir.0, true, true, true);
+        let before = snapshot(&dir.0);
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged user ignores permissions: then there is nothing to prove.
+        let privileged = fs::read_dir(&dir.0).is_ok();
+        let outcome = (
+            inspect(&dir.0).err(),
+            preflight(&dir.0).err(),
+            open(&dir.0).err(),
+        );
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o700)).unwrap();
+        if privileged {
+            return;
+        }
+        let unavailable = Some(VaultError::Unavailable);
+        assert_eq!(outcome, (unavailable, unavailable, unavailable));
+        assert_eq!(snapshot(&dir.0), before, "nothing may change");
+    }
+
+    #[test]
+    fn present_files_are_still_found_and_missing_ones_are_still_absent() {
+        let dir = TempDir::new("metadata");
+        assert_eq!(inspect(&dir.0), Ok(state(false, false, false)));
+        arrange(&dir.0, true, true, true);
+        assert_eq!(inspect(&dir.0), Ok(state(true, true, true)));
     }
 }
