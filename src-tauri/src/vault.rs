@@ -23,7 +23,10 @@ use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_mt_keystore::MtKeystoreExt;
 use zeroize::Zeroizing;
 
-use crate::{applock::LOCK_FILE, backup::LIVE_DB};
+use crate::{
+    applock::LOCK_FILE,
+    backup::{LIVE_DB, Probe},
+};
 
 pub const KEY_FILE: &str = "db.key";
 const DB_FILE: &str = LIVE_DB;
@@ -199,7 +202,12 @@ fn open_in_dir(
 ) -> Result<Db, VaultError> {
     // A swap interrupted by a crash is settled before the files are judged: the
     // state it left may otherwise look like lost data.
-    crate::backup::recover_interrupted(dir, || pair_opens(dir, &unwrap));
+    if crate::backup::recover_interrupted(dir, || pair_probe(dir, &unwrap))
+        == crate::backup::Recovered::Undecided
+    {
+        // Could not tell what state the swap left. Both copies stay as they are.
+        return Err(VaultError::Unavailable);
+    }
     let first_run = match classify(inspect(dir)?) {
         Startup::NeedsRecovery(reason) => return Err(VaultError::Recovery(reason)),
         Startup::FirstRun => true,
@@ -209,18 +217,33 @@ fn open_in_dir(
     Ok(Db::open(&dir.join(DB_FILE), &key)?)
 }
 
-/// Whether the `db.key` and `money.db` now in place open together.
-fn pair_opens(dir: &Path, unwrap: &impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>) -> bool {
-    let Ok(blob) = fs::read(dir.join(KEY_FILE)) else {
-        return false;
+/// What the `db.key` and `money.db` now in place say about themselves.
+/// Only a definite failure is `Corrupt`; anything that may pass is `Unknown`.
+fn pair_probe(dir: &Path, unwrap: &impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>) -> Probe {
+    let blob = match fs::read(dir.join(KEY_FILE)) {
+        Ok(blob) => blob,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Probe::Corrupt,
+        Err(_) => return Probe::Unknown,
     };
-    let Ok(plain) = unwrap(&blob) else {
-        return false;
+    let plain = match unwrap(&blob) {
+        Ok(plain) => plain,
+        Err(VaultError::Recovery(_)) => return Probe::Corrupt,
+        Err(VaultError::Io | VaultError::Unavailable) => return Probe::Unknown,
     };
     let Ok(bytes) = <[u8; 32]>::try_from(plain.as_slice()) else {
-        return false;
+        return Probe::Corrupt;
     };
-    Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes)).is_ok()
+    probe_of_open(Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes)).map(drop))
+}
+
+fn probe_of_open(result: Result<(), StorageError>) -> Probe {
+    match result {
+        Ok(()) => Probe::Opens,
+        // "Not a database" under the right key: the file itself is definitely bad.
+        Err(StorageError::WrongKeyOrCorrupt) => Probe::Corrupt,
+        // Busy, I/O, a newer schema, anything else: do not decide on it.
+        Err(_) => Probe::Unknown,
+    }
 }
 
 /// The answer of a second look right before something destructive.
@@ -852,5 +875,79 @@ mod tests {
         let file = dir.0.join("f");
         fs::write(&file, b"x").unwrap();
         assert_eq!(recheck_with(&file, fake_unwrap), Recheck::Transient);
+    }
+
+    // --- F13: a swap that cannot be judged is not rolled back ---------------------
+
+    #[test]
+    fn the_probe_distinguishes_definite_corruption_from_anything_that_may_pass() {
+        assert_eq!(probe_of_open(Ok(())), Probe::Opens);
+        assert_eq!(
+            probe_of_open(Err(StorageError::WrongKeyOrCorrupt)),
+            Probe::Corrupt
+        );
+        for transient in [
+            StorageError::Io,
+            StorageError::Sqlite { code: 5 }, // SQLITE_BUSY
+            StorageError::SchemaTooNew {
+                found: 99,
+                supported: 2,
+            },
+            StorageError::EncryptionUnavailable,
+        ] {
+            assert_eq!(
+                probe_of_open(Err(transient)),
+                Probe::Unknown,
+                "{transient:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keystore_that_cannot_answer_leaves_an_interrupted_swap_alone() {
+        let dir = TempDir::new("swap-unknown");
+        // A finished-but-unconfirmed swap: the new pair in place, the old one aside.
+        let fresh = [42u8; 32];
+        make_db(&dir.0.join(DB_FILE), fresh, "Nilai baru");
+        fs::write(dir.0.join(KEY_FILE), fake_wrap(&fresh).unwrap()).unwrap();
+        make_db(&dir.0.join(OLD_DB_FILE), KEY, "Nilai lama");
+        fs::write(dir.0.join("db.key.old"), fake_wrap(&KEY).unwrap()).unwrap();
+        let before = snapshot(&dir.0);
+
+        let busy = |_: &[u8]| Err(VaultError::Unavailable);
+        assert_eq!(
+            open_with(&dir.0, fake_wrap, busy).err(),
+            Some(VaultError::Unavailable)
+        );
+        assert_eq!(snapshot(&dir.0), before, "no copy may be moved or deleted");
+
+        // Once the Keystore answers, the new data is kept and the stale copy goes.
+        let db = open(&dir.0).unwrap();
+        assert_eq!(db.accounts(false).unwrap()[0].name, "Nilai baru");
+        assert!(!dir.0.join(OLD_DB_FILE).exists() && !dir.0.join("db.key.old").exists());
+    }
+
+    #[test]
+    fn a_key_blob_that_is_permanently_unusable_after_a_swap_is_a_definite_rollback() {
+        let dir = TempDir::new("swap-gone");
+        let fresh = [42u8; 32];
+        make_db(&dir.0.join(DB_FILE), fresh, "Nilai baru");
+        fs::write(dir.0.join(KEY_FILE), b"new blob that does not open").unwrap();
+        make_db(&dir.0.join(OLD_DB_FILE), KEY, "Nilai lama");
+        fs::write(dir.0.join("db.key.old"), fake_wrap(&KEY).unwrap()).unwrap();
+        // The fake Keystore reports a permanent loss for the new blob only.
+        let selective = |blob: &[u8]| {
+            if blob == b"new blob that does not open" {
+                Err(VaultError::Recovery(RecoveryReason::KeyUnusable))
+            } else {
+                fake_unwrap(blob)
+            }
+        };
+        let db = open_with(&dir.0, fake_wrap, selective).unwrap();
+        assert_eq!(
+            db.accounts(false).unwrap()[0].name,
+            "Nilai lama",
+            "rolled back to the old pair"
+        );
     }
 }

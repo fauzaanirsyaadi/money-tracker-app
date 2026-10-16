@@ -316,35 +316,75 @@ pub fn undo_swap(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// What a look at the files in place says about the new data after a swap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// The new key and database open together.
+    Opens,
+    /// A **definite** answer that they do not: missing, not a database, a key
+    /// blob that is permanently unusable.
+    Corrupt,
+    /// Could not tell: a busy or failing Keystore, an I/O error, a locked file.
+    /// Nothing may be decided, let alone deleted, on this.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovered {
+    /// No swap was interrupted.
+    Nothing,
+    /// The new files were good: the old ones were deleted.
+    Committed,
+    /// The new files were definitely incomplete or corrupt: the old ones are back.
+    RolledBack,
+    /// Could not decide. Both copies are untouched; try again later.
+    Undecided,
+}
+
 /// Settles a swap that a crash or a power loss interrupted. Call before
 /// anything opens the database at startup.
 ///
 /// A swap leaves marker files (`money.db.old`, `db.key.old`, `db.key.new`).
-/// * `db.key.new` still present: the swap never finished its renames, so the
-///   old files come back.
-/// * otherwise `new_pair_opens` decides: if the files now in place open
-///   together the swap is complete and the old ones go; if not, they return.
+/// The old copies are restored **only on a definite answer**:
+/// * `db.key.new` still present: the swap never finished its renames;
+/// * the live database is missing;
+/// * the probe says the pair in place is corrupt.
 ///
-/// If the files cannot even be examined nothing is changed.
-pub fn recover_interrupted(dir: &Path, new_pair_opens: impl FnOnce() -> bool) {
+/// If the probe says the pair opens, the old copies are deleted. If it cannot
+/// tell, or the files cannot even be examined, **nothing is changed**: a
+/// transient failure must never turn newer data into the stale older copy.
+pub fn recover_interrupted(dir: &Path, probe: impl FnOnce() -> Probe) -> Recovered {
     let markers = [old_path(dir), old_key_path(dir), new_key_path(dir)];
     let mut present = [false; 3];
     for (slot, marker) in present.iter_mut().zip(&markers) {
         match fs::exists(marker) {
             Ok(found) => *slot = found,
-            Err(_) => return,
+            Err(_) => return Recovered::Undecided,
         }
     }
     if !present.iter().any(|found| *found) {
-        return;
+        return Recovered::Nothing;
     }
     let unfinished = present[2];
-    // A missing live database is a definite answer; only a present one is probed.
-    let live_present = fs::exists(dir.join(LIVE_DB)).unwrap_or(true);
-    if !unfinished && live_present && new_pair_opens() {
-        finish_swap(dir);
+    let live_present = match fs::exists(dir.join(LIVE_DB)) {
+        Ok(found) => found,
+        Err(_) => return Recovered::Undecided,
+    };
+    let verdict = if unfinished || !live_present {
+        Probe::Corrupt
     } else {
-        let _ = undo_swap(dir);
+        probe()
+    };
+    match verdict {
+        Probe::Opens => {
+            finish_swap(dir);
+            Recovered::Committed
+        }
+        Probe::Corrupt => match undo_swap(dir) {
+            Ok(()) => Recovered::RolledBack,
+            Err(_) => Recovered::Undecided,
+        },
+        Probe::Unknown => Recovered::Undecided,
     }
 }
 
@@ -727,6 +767,14 @@ mod tests {
         db.accounts(true).ok()?.first().map(|a| a.balance.minor())
     }
 
+    fn probe_of(dir: &Dir) -> Probe {
+        if open_pair(dir).is_some() {
+            Probe::Opens
+        } else {
+            Probe::Corrupt
+        }
+    }
+
     fn assert_no_markers(dir: &Dir, context: &str) {
         for marker in ["money.db.old", "db.key.old", "db.key.new"] {
             assert!(
@@ -819,7 +867,7 @@ mod tests {
                 },
                 false,
             );
-            recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+            recover_interrupted(&dir.0, || probe_of(&dir));
             let state = open_pair(&dir);
             assert!(
                 state == Some(old_expected) || state == Some(new_expected),
@@ -834,7 +882,7 @@ mod tests {
         let (dir, _, new_blob, _, new_expected) = pair_fixture();
         swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
         // Power loss before finish_swap: markers remain, the new pair opens.
-        recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+        recover_interrupted(&dir.0, || probe_of(&dir));
         assert_eq!(open_pair(&dir), Some(new_expected));
         assert_no_markers(&dir, "after recovery");
     }
@@ -894,7 +942,7 @@ mod tests {
         fs::write(dir.file("db.key"), &blob).unwrap();
         make_db(&dir, LIVE_DB, &large, &k);
         make_db(&dir, "money.db.old", &small, &k);
-        recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+        recover_interrupted(&dir.0, || probe_of(&dir));
         assert_eq!(open_pair(&dir), Some(expected_large[0].1));
         assert_no_markers(&dir, "kept new");
 
@@ -903,8 +951,132 @@ mod tests {
         fs::write(dir.file("db.key"), &blob).unwrap();
         fs::write(dir.file(LIVE_DB), b"garbage, not a database").unwrap();
         make_db(&dir, "money.db.old", &small, &k);
-        recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+        recover_interrupted(&dir.0, || probe_of(&dir));
         assert_eq!(open_pair(&dir), Some(expected_small[0].1));
+    }
+
+    // --- F13: only a definite answer rolls back --------------------------------
+
+    #[test]
+    fn a_probe_that_cannot_tell_changes_nothing_and_keeps_both_copies() {
+        let (dir, old_blob, new_blob, _, new_expected) = pair_fixture();
+        swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        let before: Vec<_> = ["money.db", "money.db.old", "db.key", "db.key.old"]
+            .iter()
+            .map(|name| fs::read(dir.file(name)).unwrap())
+            .collect();
+
+        let outcome = recover_interrupted(&dir.0, || Probe::Unknown);
+        assert_eq!(outcome, Recovered::Undecided);
+
+        let after: Vec<_> = ["money.db", "money.db.old", "db.key", "db.key.old"]
+            .iter()
+            .map(|name| fs::read(dir.file(name)).unwrap())
+            .collect();
+        assert_eq!(
+            before, after,
+            "an unknown answer must not move or delete anything"
+        );
+        assert_eq!(fs::read(dir.file("db.key.old")).unwrap(), old_blob);
+        assert_eq!(
+            open_pair(&dir),
+            Some(new_expected),
+            "the newer data is still in place"
+        );
+    }
+
+    #[test]
+    fn a_stale_old_copy_never_replaces_newer_data_because_of_a_transient_error() {
+        // finish_swap's deletion failed once, so .old survived for a long time.
+        // Later a transient error (busy, I/O) hits the probe at startup.
+        let (dir, _, new_blob, old_expected, new_expected) = pair_fixture();
+        swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+
+        assert_eq!(
+            recover_interrupted(&dir.0, || Probe::Unknown),
+            Recovered::Undecided
+        );
+        assert_eq!(
+            open_pair(&dir),
+            Some(new_expected),
+            "newer data kept after the transient error"
+        );
+
+        // The error passes: the new pair opens, so the stale copy is simply deleted.
+        assert_eq!(
+            recover_interrupted(&dir.0, || probe_of(&dir)),
+            Recovered::Committed
+        );
+        assert_eq!(open_pair(&dir), Some(new_expected));
+        assert_ne!(new_expected, old_expected);
+        assert_no_markers(&dir, "after commit");
+    }
+
+    #[test]
+    fn a_definite_corruption_rolls_back_and_a_definite_success_commits() {
+        let (dir, _, new_blob, old_expected, _) = pair_fixture();
+        swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        assert_eq!(
+            recover_interrupted(&dir.0, || Probe::Corrupt),
+            Recovered::RolledBack
+        );
+        assert_eq!(open_pair(&dir), Some(old_expected));
+        assert_no_markers(&dir, "after rollback");
+
+        let (dir, _, new_blob, _, new_expected) = pair_fixture();
+        swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        assert_eq!(
+            recover_interrupted(&dir.0, || Probe::Opens),
+            Recovered::Committed
+        );
+        assert_eq!(open_pair(&dir), Some(new_expected));
+    }
+
+    #[test]
+    fn an_unfinished_key_or_a_missing_database_is_definite_without_asking_the_probe() {
+        // db.key.new still present: the renames never finished.
+        let (dir, old_blob, new_blob, old_expected, _) = pair_fixture();
+        let _ = swap_inner(
+            &dir.0,
+            &dir.file("staged.db"),
+            Some(&new_blob),
+            |step| {
+                if step == SwapStep::MoveKeyAside {
+                    Err(io::Error::other("crash"))
+                } else {
+                    Ok(())
+                }
+            },
+            false,
+        );
+        assert!(dir.file("db.key.new").exists());
+        let outcome = recover_interrupted(&dir.0, || unreachable!("definite without the probe"));
+        assert_eq!(outcome, Recovered::RolledBack);
+        assert_eq!(fs::read(dir.file("db.key")).unwrap(), old_blob);
+        assert_eq!(open_pair(&dir), Some(old_expected));
+
+        // The live database is gone but money.db.old exists.
+        let dir = Dir::new();
+        let k = key(4);
+        let (small, expected) = dump_text(10);
+        make_db(&dir, "money.db.old", &small, &k);
+        fs::write(
+            dir.file("db.key"),
+            [4u8; 32].iter().map(|b| b ^ 0x5a).collect::<Vec<u8>>(),
+        )
+        .unwrap();
+        let outcome = recover_interrupted(&dir.0, || unreachable!("definite without the probe"));
+        assert_eq!(outcome, Recovered::RolledBack);
+        assert_eq!(open_pair(&dir), Some(expected[0].1));
+    }
+
+    #[test]
+    fn nothing_is_reported_when_no_swap_was_interrupted() {
+        let (dir, _, _, _, _) = pair_fixture();
+        assert_eq!(
+            recover_interrupted(&dir.0, || unreachable!()),
+            Recovered::Nothing
+        );
     }
 
     // --- scale ------------------------------------------------------------
