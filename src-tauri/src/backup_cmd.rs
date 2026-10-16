@@ -23,12 +23,12 @@ use crate::{
     backup::{self, BackupFailure},
     error::{AppError, ErrorCode},
     lock::require_unlocked,
-    state::{AppState, StagedRestore},
-    vault,
+    state::{AppState, StagedRestore, StorageProblem},
+    vault::{self, RecoveryReason},
 };
 
 const PICKED_FILE: &str = "restore-input.mtbak";
-const STAGED_FILE: &str = "restore-staged.db";
+pub(crate) const STAGED_FILE: &str = "restore-staged.db";
 const EXPORT_PREFIX: &str = "export-";
 const DEFAULT_NAME: &str = "money-tracker.mtbak";
 
@@ -380,40 +380,96 @@ pub async fn backup_restore_commit(
     .await
 }
 
-/// Replaces data that cannot be read with the staged backup, under a new key.
+/// Replaces data that cannot be read with the staged one, under a new key.
 /// The user confirmed this on the recovery screen.
-fn commit_recovery(
+///
+/// Destroy last. Everything that can fail is done **before** any old file or
+/// key is touched:
+/// 1. the staged database is already built and verified (restore) or is a fresh
+///    empty one (start fresh);
+/// 2. the database key is wrapped, and the wrapped key is unwrapped again to
+///    prove it works;
+/// 3. the old and the new files are exchanged together, keeping the old ones
+///    as `*.old`; any failure puts them back;
+/// 4. the new files are opened and compared with what was staged. Only then are
+///    the old files deleted and the PIN, which belonged to the old data, erased.
+///
+/// The one unavoidable exception: when the old wrapping key itself is
+/// permanently unusable, it is replaced first, since the Keystore holds a single
+/// key under one name and a new key cannot be wrapped with an unusable one.
+/// Nothing that key protected can be read anyway; the second look made just
+/// before still found it unusable.
+pub(crate) fn commit_recovery(
     app: &AppHandle,
     state: &AppState,
     staged: &StagedRestore,
     key: &mt_storage::DbKey,
 ) -> Result<CountsDto, AppError> {
+    let Some(StorageProblem::Recovery(reason)) = state.problem() else {
+        return Err(internal());
+    };
     let dir = vault::data_dir(app).map_err(|_| internal())?;
     let keystore = app.mt_keystore();
     state.close_db();
-    // The old wrapping key is unusable or absent; a new one wraps the new key.
-    keystore.reset().map_err(|_| internal())?;
-    let blob = keystore.wrap(key.as_slice()).map_err(|_| internal())?;
-    vault::install_recovered_database(&dir, &blob, &staged.path).map_err(|_| internal())?;
-    // The PIN belonged to the old data. It is set again afterwards.
-    state.applock().erase().map_err(|_| internal())?;
 
-    // Open it the normal way and make sure it holds exactly what was staged.
-    let verified = vault::open_database(app).ok().and_then(|db| {
+    if reason == RecoveryReason::KeyUnusable {
+        keystore.reset().map_err(|_| internal())?;
+    }
+    let blob = keystore.wrap(key.as_slice()).map_err(|_| internal())?;
+    // The new wrapped key must open to exactly the key it wraps, before any file moves.
+    let round_trip = keystore.unwrap(&blob).map_err(|_| internal())?;
+    if round_trip.as_slice() != key.as_slice() {
+        return Err(internal());
+    }
+
+    let record =
+        backup::swap_with(&dir, &staged.path, Some(&blob), |_| Ok(())).map_err(|_| internal())?;
+
+    // Verify the files now in place, without settling anything: the swap is not
+    // complete until this succeeds.
+    let verified = vault::open_current_pair(app).ok().and_then(|db| {
         let found = db.export_logical(&mut io::sink()).ok()?;
         (found == staged.summary).then_some(db)
     });
     match verified {
         Some(db) => {
+            backup::finish_swap(&dir);
+            // The PIN belonged to the old data. It is set again afterwards.
+            let _ = state.applock().erase();
             state.install_db(db);
             state.set_problem(None);
             Ok(CountsDto::from(&staged.summary))
         }
         None => {
+            // The old files come back. If even that fails, the markers remain and
+            // the next start settles it.
+            let _ = backup::undo_recorded(&dir, &record);
             crate::recovery::initialize(app, state);
             Err(AppError::from(BackupFailure::Damaged))
         }
     }
+}
+
+/// "Start fresh" as a recovery commit: an empty database under a new key takes
+/// the place of the unreadable data through the same destroy-last path.
+pub(crate) fn start_fresh_commit(app: &AppHandle, state: &AppState) -> Result<(), AppError> {
+    let dir = vault::data_dir(app).map_err(|_| internal())?;
+    let key = vault::fresh_key().map_err(|_| internal())?;
+    let staged_path = dir.join(STAGED_FILE);
+    backup::remove_database(&staged_path);
+    let summary = {
+        let db = Db::open(&staged_path, &key).map_err(|_| internal())?;
+        db.export_logical(&mut io::sink()).map_err(AppError::from)?
+    };
+    let staged = StagedRestore {
+        path: staged_path.clone(),
+        summary,
+    };
+    let result = commit_recovery(app, state, &staged, &key).map(|_| ());
+    if result.is_err() {
+        backup::remove_database(&staged_path);
+    }
+    result
 }
 
 fn commit(

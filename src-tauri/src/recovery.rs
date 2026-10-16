@@ -10,7 +10,6 @@
 use std::time::Instant;
 
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_mt_keystore::MtKeystoreExt;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -175,19 +174,10 @@ pub async fn recovery_start_fresh(
     tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
         let state = worker.state::<AppState>();
         recheck_before_destroying(&worker, &state)?;
-        let dir = vault::data_dir(&worker).map_err(|_| AppError::unavailable())?;
-        state.close_db();
-        // A new wrapping key: the old one is unusable or no longer matches.
-        worker
-            .mt_keystore()
-            .reset()
-            .map_err(|_| AppError::unavailable())?;
-        vault::erase_all(&dir);
-        state
-            .applock()
-            .erase()
-            .map_err(|_| AppError::unavailable())?;
-        initialize(&worker, &state);
+        // The same destroy-last path as a restore: an empty database under a new
+        // key replaces the unreadable data, and the old files go only once the new
+        // ones are in place and verified.
+        crate::backup_cmd::start_fresh_commit(&worker, &state)?;
         match state.problem() {
             None => Ok(()),
             Some(_) => Err(AppError::unavailable()),

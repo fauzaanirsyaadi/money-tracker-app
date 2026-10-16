@@ -197,15 +197,30 @@ fn open_in_dir(
     wrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>,
     unwrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>,
 ) -> Result<Db, VaultError> {
+    // A swap interrupted by a crash is settled before the files are judged: the
+    // state it left may otherwise look like lost data.
+    crate::backup::recover_interrupted(dir, || pair_opens(dir, &unwrap));
     let first_run = match classify(inspect(dir)?) {
         Startup::NeedsRecovery(reason) => return Err(VaultError::Recovery(reason)),
         Startup::FirstRun => true,
         Startup::Ready => false,
     };
     let key = load_key(dir, &wrap, &unwrap, first_run)?;
-    // A restore interrupted by a crash is resolved before anything opens the file.
-    crate::backup::recover_interrupted(dir, |path| Db::open(path, &key).is_ok());
     Ok(Db::open(&dir.join(DB_FILE), &key)?)
+}
+
+/// Whether the `db.key` and `money.db` now in place open together.
+fn pair_opens(dir: &Path, unwrap: &impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>) -> bool {
+    let Ok(blob) = fs::read(dir.join(KEY_FILE)) else {
+        return false;
+    };
+    let Ok(plain) = unwrap(&blob) else {
+        return false;
+    };
+    let Ok(bytes) = <[u8; 32]>::try_from(plain.as_slice()) else {
+        return false;
+    };
+    Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes)).is_ok()
 }
 
 /// The answer of a second look right before something destructive.
@@ -300,29 +315,20 @@ fn write_key_file(dir: &Path, blob: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, dir.join(KEY_FILE))
 }
 
-/// Puts a restored database in place of whatever is unreadable: stores the new
-/// wrapped key, removes the old database files, moves `staged` into place.
-///
-/// The order matters. The key goes first, then the old files, then the rename:
-/// a crash at any point leaves a state `classify` reports as recovery, never
-/// one that looks like a first run. `lock.json` is removed by the caller last.
-pub fn install_recovered_database(dir: &Path, wrapped_key: &[u8], staged: &Path) -> io::Result<()> {
-    let live = dir.join(DB_FILE);
-    write_key_file(dir, wrapped_key)?;
-    crate::backup::remove_database(&live);
-    crate::backup::remove_database(&dir.join(OLD_DB_FILE));
-    // The staged file's WAL and SHM move with it (rename_set semantics).
-    for suffix in ["", "-wal", "-shm"] {
-        let mut from = staged.as_os_str().to_owned();
-        from.push(suffix);
-        let from = PathBuf::from(from);
-        if from.exists() {
-            let mut to = live.as_os_str().to_owned();
-            to.push(suffix);
-            fs::rename(from, PathBuf::from(to))?;
-        }
-    }
-    Ok(())
+/// Opens whatever `db.key` and `money.db` are in place right now, without
+/// settling any interrupted swap and without any classification. Used to verify
+/// a swap *before* it is declared complete.
+pub fn open_current_pair<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultError> {
+    let dir = data_dir(app)?;
+    let keystore = app.mt_keystore();
+    let _guard = KEY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let blob = fs::read(dir.join(KEY_FILE))?;
+    let plain = Zeroizing::new(keystore.unwrap(&blob)?);
+    let bytes: [u8; 32] = plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::Recovery(RecoveryReason::KeyUnusable))?;
+    Ok(Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes))?)
 }
 
 /// A fresh random database key, for a restore that replaces unreadable data.
@@ -330,16 +336,6 @@ pub fn fresh_key() -> Result<DbKey, VaultError> {
     let mut bytes = Zeroizing::new([0u8; 32]);
     getrandom::fill(bytes.as_mut_slice()).map_err(|_| VaultError::Io)?;
     Ok(bytes)
-}
-
-/// Deletes the database, its key and every companion, for "start fresh". Only
-/// called after the user confirmed that the existing data will be lost.
-pub fn erase_all(dir: &Path) {
-    for name in [DB_FILE, OLD_DB_FILE] {
-        crate::backup::remove_database(&dir.join(name));
-    }
-    let _ = fs::remove_file(dir.join(KEY_FILE));
-    let _ = fs::remove_file(dir.join(format!("{KEY_FILE}.tmp")));
 }
 
 #[cfg(test)]
@@ -705,32 +701,24 @@ mod tests {
     #[test]
     fn a_recovered_database_replaces_unreadable_data_and_opens_with_its_new_key() {
         let dir = TempDir::new("install");
-        // Stale, unreadable leftovers: a key blob that opens nothing, garbage, an old copy.
+        // Stale, unreadable leftovers: a key blob that opens nothing, garbage.
         fs::write(dir.0.join(KEY_FILE), b"stale wrapped key").unwrap();
         fs::write(dir.0.join(DB_FILE), b"garbage").unwrap();
-        fs::write(dir.0.join(OLD_DB_FILE), b"older garbage").unwrap();
         // The staged database, keyed with a fresh key.
         let fresh = [42u8; 32];
         let staged = dir.0.join("restore-staged.db");
         make_db(&staged, fresh, "Dari cadangan");
 
-        install_recovered_database(&dir.0, &fake_wrap(&fresh).unwrap(), &staged).unwrap();
+        crate::backup::swap_with(&dir.0, &staged, Some(&fake_wrap(&fresh).unwrap()), |_| {
+            Ok(())
+        })
+        .unwrap();
+        crate::backup::finish_swap(&dir.0);
 
         assert!(!staged.exists());
         assert!(!dir.0.join(OLD_DB_FILE).exists());
         let db = open(&dir.0).unwrap();
         assert_eq!(db.accounts(false).unwrap()[0].name, "Dari cadangan");
-    }
-
-    #[test]
-    fn erase_all_removes_the_database_and_the_key_but_nothing_else() {
-        let dir = TempDir::new("erase");
-        arrange(&dir.0, true, true, true);
-        fs::write(dir.0.join(OLD_DB_FILE), b"x").unwrap();
-        fs::write(dir.0.join("unrelated.txt"), b"keep").unwrap();
-        erase_all(&dir.0);
-        let left: Vec<String> = snapshot(&dir.0).into_keys().collect();
-        assert_eq!(left, [LOCK_FILE.to_owned(), "unrelated.txt".to_owned()]);
     }
 
     #[test]

@@ -124,87 +124,225 @@ pub fn remove_database(path: &Path) {
     }
 }
 
+/// The steps of a swap, in order. Tests make any one of them fail, or stop the
+/// process there, to prove the old data survives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapStep {
-    MoveLiveAside,
+    /// Writes the new wrapped key next to the old one (recovery only).
+    WriteNewKey,
+    MoveDbAside,
+    /// Moves the old `db.key` aside (recovery only).
+    MoveKeyAside,
+    /// Renames the new key into place (recovery only).
+    PromoteKey,
     MoveStagedIn,
 }
+
+const KEY_FILE: &str = crate::vault::KEY_FILE;
 
 fn old_path(dir: &Path) -> PathBuf {
     with_suffix(&dir.join(LIVE_DB), OLD_SUFFIX)
 }
 
+fn old_key_path(dir: &Path) -> PathBuf {
+    with_suffix(&dir.join(KEY_FILE), OLD_SUFFIX)
+}
+
+fn new_key_path(dir: &Path) -> PathBuf {
+    with_suffix(&dir.join(KEY_FILE), ".new")
+}
+
 fn rename_set(from: &Path, to: &Path) -> io::Result<()> {
     for suffix in COMPANIONS {
         let (src, dst) = (with_suffix(from, suffix), with_suffix(to, suffix));
-        if src.exists() {
+        // `fs::exists` fails on anything but "not found" instead of calling it absent.
+        if fs::exists(&src)? {
             fs::rename(src, dst)?;
         }
     }
     Ok(())
 }
 
-/// Replaces the live database with `staged`, keeping the old one aside as
-/// `money.db.old`. Both databases must be closed. On failure the old database
-/// is put back before returning.
-pub fn swap_in(dir: &Path, staged: &Path) -> io::Result<()> {
-    swap_in_with(dir, staged, |_| Ok(()))
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
-pub fn swap_in_with(
+/// What a swap has done so far, so a failure can undo exactly that.
+#[derive(Default, Clone)]
+struct Progress {
+    new_key_written: bool,
+    db_moved: bool,
+    key_moved: bool,
+    key_promoted: bool,
+    staged_in: bool,
+}
+
+/// Replaces the live database with `staged`, keeping the old one aside as
+/// `money.db.old`. The database must be closed. On failure the old database is
+/// put back before returning.
+pub fn swap_in(dir: &Path, staged: &Path) -> io::Result<()> {
+    swap_with(dir, staged, None, |_| Ok(())).map(|_| ())
+}
+
+/// What a finished swap moved, kept so that a failed verification can undo
+/// exactly that, including removing new files when there was nothing old to
+/// bring back.
+pub struct SwapRecord(Progress);
+
+/// Replaces `money.db` and, when `new_key` is given, `db.key` **together**. The
+/// old files are kept as `*.old` until [`finish_swap`]; a failure at any step
+/// puts them back, and a crash is settled at the next start by
+/// [`recover_interrupted`]. Nothing old is deleted here.
+pub fn swap_with(
     dir: &Path,
     staged: &Path,
-    mut step: impl FnMut(SwapStep) -> io::Result<()>,
+    new_key: Option<&[u8]>,
+    hook: impl FnMut(SwapStep) -> io::Result<()>,
+) -> io::Result<SwapRecord> {
+    swap_inner(dir, staged, new_key, hook, true)
+}
+
+fn swap_inner(
+    dir: &Path,
+    staged: &Path,
+    new_key: Option<&[u8]>,
+    mut hook: impl FnMut(SwapStep) -> io::Result<()>,
+    rollback_on_error: bool,
+) -> io::Result<SwapRecord> {
+    // A leftover from an earlier crash is resolved at startup, never here.
+    for leftover in [old_path(dir), old_key_path(dir), new_key_path(dir)] {
+        if fs::exists(&leftover)? {
+            return Err(io::Error::other("an earlier swap is unresolved"));
+        }
+    }
+    let mut progress = Progress::default();
+    let result = run_swap(dir, staged, new_key, &mut hook, &mut progress);
+    if let Err(err) = result {
+        if rollback_on_error {
+            restore_old(dir, &progress)?;
+        }
+        return Err(err);
+    }
+    Ok(SwapRecord(progress))
+}
+
+fn run_swap(
+    dir: &Path,
+    staged: &Path,
+    new_key: Option<&[u8]>,
+    hook: &mut impl FnMut(SwapStep) -> io::Result<()>,
+    progress: &mut Progress,
 ) -> io::Result<()> {
     let live = dir.join(LIVE_DB);
-    let old = old_path(dir);
-    // A leftover from an earlier crash is resolved at startup, never here.
-    if old.exists() {
-        return Err(io::Error::other("an earlier restore is unresolved"));
+    let key = dir.join(KEY_FILE);
+    if let Some(blob) = new_key {
+        hook(SwapStep::WriteNewKey)?;
+        write_synced(&new_key_path(dir), blob)?;
+        progress.new_key_written = true;
     }
+    hook(SwapStep::MoveDbAside)?;
+    if fs::exists(&live)? {
+        rename_set(&live, &old_path(dir))?;
+        progress.db_moved = true;
+    }
+    if new_key.is_some() {
+        hook(SwapStep::MoveKeyAside)?;
+        if fs::exists(&key)? {
+            fs::rename(&key, old_key_path(dir))?;
+            progress.key_moved = true;
+        }
+        hook(SwapStep::PromoteKey)?;
+        fs::rename(new_key_path(dir), &key)?;
+        progress.key_promoted = true;
+    }
+    hook(SwapStep::MoveStagedIn)?;
+    rename_set(staged, &live)?;
+    progress.staged_in = true;
+    Ok(())
+}
 
-    step(SwapStep::MoveLiveAside)?;
-    rename_set(&live, &old)?;
-    let moved_in = step(SwapStep::MoveStagedIn).and_then(|()| rename_set(staged, &live));
-    if let Err(err) = moved_in {
-        // Undo: whatever reached `live` is removed and the old set returns.
+/// Undoes what [`run_swap`] did, newest first.
+fn restore_old(dir: &Path, progress: &Progress) -> io::Result<()> {
+    let live = dir.join(LIVE_DB);
+    let key = dir.join(KEY_FILE);
+    if progress.staged_in {
         remove_database(&live);
-        rename_set(&old, &live)?;
-        return Err(err);
+    }
+    if progress.key_promoted {
+        let _ = fs::remove_file(&key);
+    }
+    if progress.key_moved {
+        fs::rename(old_key_path(dir), &key)?;
+    }
+    if progress.db_moved {
+        remove_database(&live);
+        rename_set(&old_path(dir), &live)?;
+    }
+    if progress.new_key_written {
+        let _ = fs::remove_file(new_key_path(dir));
     }
     Ok(())
 }
 
-/// The new database opened and verified: the old one can go.
+/// Undoes a finished swap whose result failed verification: new files are
+/// removed and old ones brought back, whatever was (or was not) there before.
+pub fn undo_recorded(dir: &Path, record: &SwapRecord) -> io::Result<()> {
+    restore_old(dir, &record.0)
+}
+
+/// The new data opened and verified: the old files can go.
 pub fn finish_swap(dir: &Path) {
     remove_database(&old_path(dir));
+    let _ = fs::remove_file(old_key_path(dir));
+    let _ = fs::remove_file(new_key_path(dir));
 }
 
-/// The new database was bad: restore the old one.
+/// The new data was bad: bring the old files back. Needs no memory of what the
+/// swap did (it also settles a crashed one), so it only looks at what is on disk.
 pub fn undo_swap(dir: &Path) -> io::Result<()> {
     let live = dir.join(LIVE_DB);
-    remove_database(&live);
-    rename_set(&old_path(dir), &live)
+    let key = dir.join(KEY_FILE);
+    if fs::exists(old_path(dir))? {
+        remove_database(&live);
+        rename_set(&old_path(dir), &live)?;
+    }
+    if fs::exists(old_key_path(dir))? {
+        let _ = fs::remove_file(&key);
+        fs::rename(old_key_path(dir), &key)?;
+    }
+    let _ = fs::remove_file(new_key_path(dir));
+    Ok(())
 }
 
-/// Resolves a restore that was interrupted by a crash or a power loss.
-/// Call before opening the database at startup.
+/// Settles a swap that a crash or a power loss interrupted. Call before
+/// anything opens the database at startup.
 ///
-/// * live missing, old present: the swap stopped between its two renames, so
-///   the old database comes back.
-/// * both present: the swap completed but was not confirmed; the new database
-///   stays if `new_opens` says it is readable, otherwise the old one returns.
-pub fn recover_interrupted(dir: &Path, new_opens: impl FnOnce(&Path) -> bool) {
-    let live = dir.join(LIVE_DB);
-    let old = old_path(dir);
-    let old_exists = old.exists();
-    if !old_exists {
+/// A swap leaves marker files (`money.db.old`, `db.key.old`, `db.key.new`).
+/// * `db.key.new` still present: the swap never finished its renames, so the
+///   old files come back.
+/// * otherwise `new_pair_opens` decides: if the files now in place open
+///   together the swap is complete and the old ones go; if not, they return.
+///
+/// If the files cannot even be examined nothing is changed.
+pub fn recover_interrupted(dir: &Path, new_pair_opens: impl FnOnce() -> bool) {
+    let markers = [old_path(dir), old_key_path(dir), new_key_path(dir)];
+    let mut present = [false; 3];
+    for (slot, marker) in present.iter_mut().zip(&markers) {
+        match fs::exists(marker) {
+            Ok(found) => *slot = found,
+            Err(_) => return,
+        }
+    }
+    if !present.iter().any(|found| *found) {
         return;
     }
-    if !live.exists() {
-        let _ = rename_set(&old, &live);
-    } else if new_opens(&live) {
-        remove_database(&old);
+    let unfinished = present[2];
+    // A missing live database is a definite answer; only a present one is probed.
+    let live_present = fs::exists(dir.join(LIVE_DB)).unwrap_or(true);
+    if !unfinished && live_present && new_pair_opens() {
+        finish_swap(dir);
     } else {
         let _ = undo_swap(dir);
     }
@@ -483,7 +621,7 @@ mod tests {
         assert!(!staged.exists());
     }
 
-    // --- swap -------------------------------------------------------------
+    // --- swap: one database ------------------------------------------------
 
     fn make_db(dir: &Dir, name: &str, text: &str, k: &DbKey) -> LogicalSummary {
         let (db, summary) = live_db_from(text, dir, name, k);
@@ -513,8 +651,7 @@ mod tests {
             "the old database is kept"
         );
         let db = Db::open(&dir.file(LIVE_DB), &k).unwrap();
-        let tx = db.accounts(true).unwrap();
-        assert_eq!(tx.len(), 5);
+        assert_eq!(db.accounts(true).unwrap().len(), 5);
         drop(db);
 
         finish_swap(&dir.0);
@@ -526,7 +663,7 @@ mod tests {
     fn undo_swap_brings_the_old_database_back() {
         let dir = Dir::new();
         let k = key(4);
-        let (small, _) = dump_text(10);
+        let (small, expected_small) = dump_text(10);
         let (large, _) = dump_text(50);
         make_db(&dir, LIVE_DB, &small, &k);
         make_db(&dir, "staged.db", &large, &k);
@@ -534,23 +671,105 @@ mod tests {
         undo_swap(&dir.0).unwrap();
         assert!(!dir.file("money.db.old").exists());
         let db = Db::open(&dir.file(LIVE_DB), &k).unwrap();
-        // The original has only 10 transactions: balance of account 1 shows it.
-        let first = db.accounts(true).unwrap()[0].balance.minor();
-        let (_, expected_small) = dump_text(10);
-        assert_eq!(first, expected_small[0].1);
+        assert_eq!(
+            db.accounts(true).unwrap()[0].balance.minor(),
+            expected_small[0].1
+        );
     }
 
     #[test]
-    fn a_failure_at_either_step_leaves_the_old_database_in_place() {
-        for failing in [SwapStep::MoveLiveAside, SwapStep::MoveStagedIn] {
+    fn swap_refuses_while_an_earlier_swap_is_unresolved() {
+        for marker in ["money.db.old", "db.key.old", "db.key.new"] {
             let dir = Dir::new();
             let k = key(4);
-            let (small, expected) = dump_text(10);
-            let (large, _) = dump_text(50);
+            let (small, _) = dump_text(10);
             make_db(&dir, LIVE_DB, &small, &k);
-            make_db(&dir, "staged.db", &large, &k);
+            make_db(&dir, "staged.db", &small, &k);
+            fs::write(dir.file(marker), b"x").unwrap();
+            assert!(swap_in(&dir.0, &dir.file("staged.db")).is_err(), "{marker}");
+            assert!(dir.file(LIVE_DB).exists(), "{marker}");
+        }
+    }
 
-            let err = swap_in_with(&dir.0, &dir.file("staged.db"), |step| {
+    // --- swap: database and key together (recovery) -----------------------------
+
+    const OLD_KEY: u8 = 4;
+    const NEW_KEY: u8 = 9;
+
+    /// A directory holding an *old* pair and a staged database under a new key.
+    /// Returns (dir, old key blob, new key blob, old expected balance, new expected balance).
+    fn pair_fixture() -> (Dir, Vec<u8>, Vec<u8>, i64, i64) {
+        let dir = Dir::new();
+        let (small, old_expected) = dump_text(10);
+        let (large, new_expected) = dump_text(50);
+        make_db(&dir, LIVE_DB, &small, &key(OLD_KEY));
+        make_db(&dir, "staged.db", &large, &key(NEW_KEY));
+        // The Keystore stand-in: wrapping is a reversible byte transform.
+        let old_blob: Vec<u8> = [OLD_KEY; 32].iter().map(|b| b ^ 0x5a).collect();
+        let new_blob: Vec<u8> = [NEW_KEY; 32].iter().map(|b| b ^ 0x5a).collect();
+        fs::write(dir.file("db.key"), &old_blob).unwrap();
+        (
+            dir,
+            old_blob,
+            new_blob,
+            old_expected[0].1,
+            new_expected[0].1,
+        )
+    }
+
+    /// Opens whatever pair is in place, the way startup does, and says which
+    /// data it holds (first account balance) or None if it does not open.
+    fn open_pair(dir: &Dir) -> Option<i64> {
+        let blob = fs::read(dir.file("db.key")).ok()?;
+        let plain: Vec<u8> = blob.iter().map(|b| b ^ 0x5a).collect();
+        let bytes: [u8; 32] = plain.try_into().ok()?;
+        let db = Db::open(&dir.file(LIVE_DB), &Zeroizing::new(bytes)).ok()?;
+        db.accounts(true).ok()?.first().map(|a| a.balance.minor())
+    }
+
+    fn assert_no_markers(dir: &Dir, context: &str) {
+        for marker in ["money.db.old", "db.key.old", "db.key.new"] {
+            assert!(
+                !dir.file(marker).exists(),
+                "{context}: {marker} left behind"
+            );
+        }
+    }
+
+    const STEPS: [SwapStep; 5] = [
+        SwapStep::WriteNewKey,
+        SwapStep::MoveDbAside,
+        SwapStep::MoveKeyAside,
+        SwapStep::PromoteKey,
+        SwapStep::MoveStagedIn,
+    ];
+
+    #[test]
+    fn a_complete_pair_swap_puts_the_new_data_in_place_and_keeps_the_old_aside() {
+        let (dir, old_blob, new_blob, _, new_expected) = pair_fixture();
+        swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        assert_eq!(open_pair(&dir), Some(new_expected));
+        assert_eq!(
+            fs::read(dir.file("db.key.old")).unwrap(),
+            old_blob,
+            "the old key is kept"
+        );
+        assert!(
+            dir.file("money.db.old").exists(),
+            "the old database is kept"
+        );
+        finish_swap(&dir.0);
+        assert_no_markers(&dir, "after finish");
+        assert_eq!(open_pair(&dir), Some(new_expected));
+    }
+
+    #[test]
+    fn a_failure_at_any_step_leaves_the_old_data_intact_and_readable() {
+        for failing in STEPS {
+            let (dir, old_blob, new_blob, old_expected, _) = pair_fixture();
+            let old_db_bytes = fs::read(dir.file(LIVE_DB)).unwrap();
+
+            let err = swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |step| {
                 if step == failing {
                     Err(io::Error::other("injected"))
                 } else {
@@ -559,88 +778,133 @@ mod tests {
             })
             .err();
             assert!(err.is_some(), "{failing:?}");
-            assert!(
-                !dir.file("money.db.old").exists(),
-                "{failing:?}: old set not restored"
+            assert_no_markers(&dir, &format!("{failing:?}"));
+            assert_eq!(
+                fs::read(dir.file("db.key")).unwrap(),
+                old_blob,
+                "{failing:?}: key"
+            );
+            assert_eq!(
+                fs::read(dir.file(LIVE_DB)).unwrap(),
+                old_db_bytes,
+                "{failing:?}: database"
+            );
+            assert_eq!(
+                open_pair(&dir),
+                Some(old_expected),
+                "{failing:?}: old data readable"
             );
             assert!(
                 dir.file("staged.db").exists(),
-                "{failing:?}: staged file must survive"
-            );
-            let db = Db::open(&dir.file(LIVE_DB), &k).unwrap();
-            assert_eq!(
-                db.accounts(true).unwrap()[0].balance.minor(),
-                expected[0].1,
-                "{failing:?}"
+                "{failing:?}: the staged database survives"
             );
         }
     }
 
     #[test]
-    fn startup_recovery_handles_both_crash_points() {
+    fn a_crash_at_any_step_is_settled_at_the_next_start_with_old_or_new_never_a_mix() {
+        for crash_before in STEPS {
+            let (dir, _, new_blob, old_expected, new_expected) = pair_fixture();
+            // The process dies before `crash_before`: no rollback runs.
+            let _ = swap_inner(
+                &dir.0,
+                &dir.file("staged.db"),
+                Some(&new_blob),
+                |step| {
+                    if step == crash_before {
+                        Err(io::Error::other("crash"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                false,
+            );
+            recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+            let state = open_pair(&dir);
+            assert!(
+                state == Some(old_expected) || state == Some(new_expected),
+                "{crash_before:?}: the pair must open as old or as new, got {state:?}"
+            );
+            assert_no_markers(&dir, &format!("{crash_before:?}"));
+        }
+    }
+
+    #[test]
+    fn a_crash_after_the_last_rename_keeps_the_new_data() {
+        let (dir, _, new_blob, _, new_expected) = pair_fixture();
+        swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        // Power loss before finish_swap: markers remain, the new pair opens.
+        recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+        assert_eq!(open_pair(&dir), Some(new_expected));
+        assert_no_markers(&dir, "after recovery");
+    }
+
+    #[test]
+    fn a_failed_verification_goes_back_to_the_old_data() {
+        let (dir, old_blob, new_blob, old_expected, _) = pair_fixture();
+        let record =
+            swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        undo_recorded(&dir.0, &record).unwrap();
+        assert_no_markers(&dir, "after undo");
+        assert_eq!(fs::read(dir.file("db.key")).unwrap(), old_blob);
+        assert_eq!(open_pair(&dir), Some(old_expected));
+    }
+
+    #[test]
+    fn a_pair_swap_with_no_old_files_at_all_also_works_and_undoes() {
+        // Recovery from "database missing" / "key missing": nothing old to keep.
+        let dir = Dir::new();
+        let (large, expected) = dump_text(50);
+        make_db(&dir, "staged.db", &large, &key(NEW_KEY));
+        let new_blob: Vec<u8> = [NEW_KEY; 32].iter().map(|b| b ^ 0x5a).collect();
+        let record =
+            swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+        assert_eq!(open_pair(&dir), Some(expected[0].1));
+        undo_recorded(&dir.0, &record).unwrap();
+        assert!(!dir.file(LIVE_DB).exists() && !dir.file("db.key").exists());
+        assert_no_markers(&dir, "empty start");
+    }
+
+    #[test]
+    fn startup_recovery_does_nothing_when_no_swap_was_interrupted() {
+        let (dir, old_blob, _, old_expected, _) = pair_fixture();
+        recover_interrupted(&dir.0, || unreachable!("not consulted without markers"));
+        assert_eq!(fs::read(dir.file("db.key")).unwrap(), old_blob);
+        assert_eq!(open_pair(&dir), Some(old_expected));
+    }
+
+    #[test]
+    fn startup_recovery_covers_the_single_database_crash_points_too() {
         let k = key(4);
         let (small, expected_small) = dump_text(10);
         let (large, expected_large) = dump_text(50);
+        let blob: Vec<u8> = [4u8; 32].iter().map(|b| b ^ 0x5a).collect();
 
         // Crash between the two renames: money.db is missing, money.db.old holds the data.
         let dir = Dir::new();
+        fs::write(dir.file("db.key"), &blob).unwrap();
         make_db(&dir, "money.db.old", &small, &k);
-        recover_interrupted(&dir.0, |_| {
-            unreachable!("not consulted when live is missing")
+        recover_interrupted(&dir.0, || {
+            unreachable!("not consulted when the live database is gone")
         });
-        let db = Db::open(&dir.file(LIVE_DB), &k).unwrap();
-        assert_eq!(
-            db.accounts(true).unwrap()[0].balance.minor(),
-            expected_small[0].1
-        );
-        assert!(!dir.file("money.db.old").exists());
-        drop(db);
+        assert_eq!(open_pair(&dir), Some(expected_small[0].1));
 
         // Crash after the swap, new database readable: keep it, drop the old.
         let dir = Dir::new();
+        fs::write(dir.file("db.key"), &blob).unwrap();
         make_db(&dir, LIVE_DB, &large, &k);
         make_db(&dir, "money.db.old", &small, &k);
-        recover_interrupted(&dir.0, |path| Db::open(path, &k).is_ok());
-        let db = Db::open(&dir.file(LIVE_DB), &k).unwrap();
-        assert_eq!(
-            db.accounts(true).unwrap()[0].balance.minor(),
-            expected_large[0].1
-        );
-        assert!(!dir.file("money.db.old").exists());
-        drop(db);
+        recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+        assert_eq!(open_pair(&dir), Some(expected_large[0].1));
+        assert_no_markers(&dir, "kept new");
 
         // Crash after the swap, new database unreadable: put the old one back.
         let dir = Dir::new();
+        fs::write(dir.file("db.key"), &blob).unwrap();
         fs::write(dir.file(LIVE_DB), b"garbage, not a database").unwrap();
         make_db(&dir, "money.db.old", &small, &k);
-        recover_interrupted(&dir.0, |path| Db::open(path, &k).is_ok());
-        let db = Db::open(&dir.file(LIVE_DB), &k).unwrap();
-        assert_eq!(
-            db.accounts(true).unwrap()[0].balance.minor(),
-            expected_small[0].1
-        );
-    }
-
-    #[test]
-    fn recovery_does_nothing_when_no_restore_was_interrupted() {
-        let dir = Dir::new();
-        let k = key(4);
-        let (small, _) = dump_text(10);
-        make_db(&dir, LIVE_DB, &small, &k);
-        recover_interrupted(&dir.0, |_| unreachable!());
-        assert!(dir.file(LIVE_DB).exists());
-    }
-
-    #[test]
-    fn swap_refuses_while_an_earlier_restore_is_unresolved() {
-        let dir = Dir::new();
-        let k = key(4);
-        let (small, _) = dump_text(10);
-        make_db(&dir, LIVE_DB, &small, &k);
-        make_db(&dir, "staged.db", &small, &k);
-        fs::write(dir.file("money.db.old"), b"x").unwrap();
-        assert!(swap_in(&dir.0, &dir.file("staged.db")).is_err());
-        assert!(dir.file(LIVE_DB).exists());
+        recover_interrupted(&dir.0, || open_pair(&dir).is_some());
+        assert_eq!(open_pair(&dir), Some(expected_small[0].1));
     }
 
     // --- scale ------------------------------------------------------------
