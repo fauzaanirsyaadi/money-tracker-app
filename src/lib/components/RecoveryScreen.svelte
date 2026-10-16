@@ -5,7 +5,13 @@
   import Icon from "$lib/components/Icon.svelte";
   import RestoreCard from "$lib/components/RestoreCard.svelte";
   import Field from "$lib/components/Field.svelte";
-  import { confirmationMatches, needsPin, recoveryText, START_FRESH_WORD } from "$lib/recovery";
+  import {
+    confirmationMatches,
+    needsPin,
+    recoveryText,
+    retryAdvice,
+    START_FRESH_WORD,
+  } from "$lib/recovery";
   import { applyLockStatus, dataChanged, lockState, notify, refreshLock } from "$lib/session.svelte";
 
   const text = $derived(recoveryText(lockState.status?.storage ?? "ok"));
@@ -14,6 +20,9 @@
 
   let busy = $state(false);
   let message = $state("");
+  // How many times in a row "try again" ended in the same failure.
+  let failedRetries = $state(0);
+  const advice = $derived(retryAdvice(failedRetries));
   let typed = $state("");
   let pin = $state("");
 
@@ -46,10 +55,14 @@
     message = "";
     try {
       applyLockStatus(await recovery.retry());
-      if (lockState.status?.storage !== "ok") message = "Masih belum dapat dibuka.";
+      if (lockState.status?.storage !== "ok") {
+        message = "Masih belum dapat dibuka.";
+        failedRetries += 1;
+      }
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
       message = "Masih belum dapat dibuka.";
+      failedRetries += 1;
     } finally {
       busy = false;
     }
@@ -142,6 +155,17 @@
       <Button variant="primary" block disabled={busy} onclick={retry}>
         {busy ? "Memeriksa…" : "Coba lagi"}
       </Button>
+      {#if advice}
+        <Card tone="warning">
+          <h2>{advice.title}</h2>
+          <p class="muted">{advice.explanation}</p>
+          <ol class="steps">
+            {#each advice.steps as step (step)}
+              <li>{step}</li>
+            {/each}
+          </ol>
+        </Card>
+      {/if}
     {/if}
   </div>
 </main>
@@ -187,6 +211,13 @@
   }
   .muted {
     margin: 0 0 var(--space-3);
+  }
+  .steps {
+    margin: 0;
+    padding-left: var(--space-5);
+    display: grid;
+    gap: var(--space-2);
+    font-size: var(--fs-sm);
   }
   .pinform {
     display: grid;

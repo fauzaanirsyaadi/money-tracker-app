@@ -18,6 +18,35 @@ export function needsPin(status: {
   return status.configured && !status.broken && !status.recoveryAuthenticated;
 }
 
+/** Consecutive "try again" failures after which the screen explains the way out. */
+export const PERSISTENT_FAILURES = 3;
+
+export interface RetryAdvice {
+  title: string;
+  explanation: string;
+  steps: string[];
+}
+
+/**
+ * What to tell the user when "try again" keeps failing. This is guidance only:
+ * it never offers a destructive action, and clearing the app data is the
+ * user's own decision in Android settings.
+ */
+export function retryAdvice(consecutiveFailures: number): RetryAdvice | null {
+  if (consecutiveFailures < PERSISTENT_FAILURES) return null;
+  return {
+    title: "Data belum bisa dibuka",
+    explanation:
+      "Penyimpanan tetap gagal dibuka setelah beberapa kali mencoba. Mungkin kunci keamanan perangkat bermasalah. Data di dalam aplikasi tidak dapat dibuka sementara ini, dan satu-satunya cara memulihkannya adalah dari cadangan terenkripsi.",
+    steps: [
+      "Mulai ulang ponsel, lalu coba lagi. Banyak masalah Keystore hilang setelah itu.",
+      "Jika tetap gagal dan Anda punya berkas cadangan: buka Pengaturan Android → Aplikasi → Money Tracker → Penyimpanan → Hapus data.",
+      "Buka aplikasi lagi, lalu pilih Pulihkan dari cadangan dan pilih berkas cadangan Anda.",
+      "Tanpa cadangan, data tidak dapat dipulihkan. Jangan menghapus data aplikasi sebelum Anda yakin.",
+    ],
+  };
+}
+
 export interface RecoveryText {
   title: string;
   explanation: string;

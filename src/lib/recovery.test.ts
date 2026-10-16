@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { StorageState } from "./api.ts";
-import { confirmationMatches, needsPin, recoveryText, START_FRESH_WORD } from "./recovery.ts";
+import {
+  confirmationMatches,
+  needsPin,
+  PERSISTENT_FAILURES,
+  recoveryText,
+  retryAdvice,
+  START_FRESH_WORD,
+} from "./recovery.ts";
 
 const LOSS: StorageState[] = ["database_missing", "key_missing", "key_unusable", "database_unreadable"];
 
@@ -43,4 +50,22 @@ test("the PIN is asked first whenever a valid lock exists and was not just confi
   // No lock, or a damaged lock file that cannot be checked against: no PIN to ask for.
   assert.equal(needsPin({ configured: false, broken: false, recoveryAuthenticated: false }), false);
   assert.equal(needsPin({ configured: true, broken: true, recoveryAuthenticated: false }), false);
+});
+
+test("a few failed retries show nothing yet, persistent ones explain the way out", () => {
+  for (let failures = 0; failures < PERSISTENT_FAILURES; failures += 1) {
+    assert.equal(retryAdvice(failures), null, String(failures));
+  }
+  const advice = retryAdvice(PERSISTENT_FAILURES)!;
+  assert.match(advice.explanation, /satu-satunya cara memulihkannya adalah dari cadangan/);
+  assert.equal(advice.steps.length, 4);
+  assert.match(advice.steps.join(" "), /Hapus data/);
+  assert.match(advice.steps.join(" "), /Pulihkan dari cadangan/);
+  // The same advice keeps showing as failures continue.
+  assert.deepEqual(retryAdvice(PERSISTENT_FAILURES + 7), advice);
+});
+
+test("the advice warns that without a backup nothing can be recovered", () => {
+  const steps = retryAdvice(PERSISTENT_FAILURES)!.steps;
+  assert.match(steps[steps.length - 1]!, /Tanpa cadangan/);
 });
