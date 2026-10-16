@@ -19,6 +19,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
+
+    testOptions {
+        // The Android stubs (KeyPermanentlyInvalidatedException, ...) must be
+        // constructible in plain JVM tests.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {
@@ -29,4 +35,7 @@ kotlin {
 
 dependencies {
     implementation(project(":tauri-android"))
+
+    // JVM unit tests for the Keystore failure classification. EPL-2.0, test scope only.
+    testImplementation("junit:junit:4.13.2")
 }

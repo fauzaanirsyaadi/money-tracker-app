@@ -3,35 +3,24 @@ package com.plugin.mt_keystore
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
-import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
-import java.security.UnrecoverableKeyException
-import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * The wrapping key is permanently unusable: the alias is gone, the key was
- * invalidated, or the blob does not authenticate under it. Anything else
- * (service busy, device locked) is a different, possibly temporary, failure.
- */
-class KeyGoneException : Exception()
-
 /** AES-256-GCM key held in the Android Keystore; output layout is `iv(12) || ciphertext+tag`. */
 class KeyVault {
     private val keyStore: KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
-    /** The existing key, or null when no key exists. Never creates one. */
-    private fun existingKey(): SecretKey? =
-        try {
-            keyStore.getKey(ALIAS, null) as? SecretKey
-        } catch (e: UnrecoverableKeyException) {
-            throw KeyGoneException()
-        }
+    /**
+     * The existing key, or null when no key exists. Never creates one. Any
+     * exception (including `UnrecoverableKeyException`) is passed on as it is:
+     * see [classify] for which ones count as permanent.
+     */
+    private fun existingKey(): SecretKey? = keyStore.getKey(ALIAS, null) as? SecretKey
 
     /** The existing key, creating one if none exists. Only `wrap` may create. */
     @Synchronized
@@ -83,15 +72,11 @@ class KeyVault {
      */
     fun unwrap(blob: ByteArray): ByteArray {
         if (blob.size <= IV_BYTES + TAG_BYTES) throw KeyGoneException()
-        val key = existingKey() ?: throw KeyGoneException()
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        try {
+        val key = keyOrGone { existingKey() }
+        return authenticatedTwice {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BYTES * 8, blob, 0, IV_BYTES))
-            return cipher.doFinal(blob, IV_BYTES, blob.size - IV_BYTES)
-        } catch (e: KeyPermanentlyInvalidatedException) {
-            throw KeyGoneException()
-        } catch (e: AEADBadTagException) {
-            throw KeyGoneException()
+            cipher.doFinal(blob, IV_BYTES, blob.size - IV_BYTES)
         }
     }
 

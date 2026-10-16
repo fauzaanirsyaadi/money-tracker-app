@@ -59,12 +59,14 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
             val ret = JSObject()
             ret.put("data", Hex.encode(out))
             invoke.resolve(ret)
-        } catch (e: KeyGoneException) {
-            // Permanent loss, the one case the app may offer recovery for.
-            invoke.reject("keystore", "key_gone")
         } catch (e: Exception) {
-            // Deliberately generic: exception text could echo sensitive state.
-            invoke.reject("keystore")
+            // Only an explicit permanent signal may lead to the recovery screen;
+            // everything else is "try again". The message stays generic:
+            // exception text could echo sensitive state.
+            when (classify(e)) {
+                KeyFailure.KEY_GONE -> invoke.reject("keystore", "key_gone")
+                KeyFailure.TRANSIENT -> invoke.reject("keystore")
+            }
         }
     }
 }

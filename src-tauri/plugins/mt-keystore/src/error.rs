@@ -30,16 +30,58 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The Kotlin side rejects with the code `key_gone` **only** for an explicit
+/// permanent signal. Any other code, no code, or a failure of the bridge itself
+/// is transient: unknown errors never lead to recovery.
+#[cfg_attr(
+    not(mobile),
+    allow(dead_code, reason = "used by the Android bridge and by tests")
+)]
+pub(crate) fn classify_rejection(code: Option<&str>) -> Error {
+    match code {
+        Some("key_gone") => Error::KeyGone,
+        _ => Error::Keystore,
+    }
+}
+
 #[cfg(mobile)]
 impl From<tauri::plugin::mobile::PluginInvokeError> for Error {
     fn from(err: tauri::plugin::mobile::PluginInvokeError) -> Self {
         use tauri::plugin::mobile::PluginInvokeError::InvokeRejected;
         match err {
-            // Kotlin rejects with the code `key_gone` only for permanent loss.
-            InvokeRejected(response) if response.code.as_deref() == Some("key_gone") => {
-                Self::KeyGone
-            }
+            InvokeRejected(response) => classify_rejection(response.code.as_deref()),
             _ => Self::Keystore,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_explicit_permanent_code_means_the_key_is_gone() {
+        assert!(matches!(
+            classify_rejection(Some("key_gone")),
+            Error::KeyGone
+        ));
+    }
+
+    #[test]
+    fn every_other_rejection_is_transient() {
+        for code in [
+            None,
+            Some("keystore"),
+            Some("path"),
+            Some(""),
+            Some("KEY_GONE"),
+            Some("key_gone "),
+            Some("unknown"),
+        ] {
+            assert!(
+                matches!(classify_rejection(code), Error::Keystore),
+                "{code:?}"
+            );
         }
     }
 }
