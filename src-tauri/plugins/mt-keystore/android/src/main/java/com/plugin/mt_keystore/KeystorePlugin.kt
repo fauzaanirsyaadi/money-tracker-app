@@ -13,6 +13,17 @@ class DataArgs {
     var data: String = ""
 }
 
+@InvokeArg
+class VersionArgs {
+    var version: Int = 0
+}
+
+@InvokeArg
+class VersionDataArgs {
+    var version: Int = 0
+    var data: String = ""
+}
+
 /**
  * Wraps and unwraps the database key with a non-exportable Android Keystore key.
  * No payload or key bytes are ever logged.
@@ -43,12 +54,49 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun reset(invoke: Invoke) {
-        try {
-            vault.reset()
+    fun nextAliasVersion(invoke: Invoke) {
+        guard(invoke) {
+            val ret = JSObject()
+            ret.put("version", vault.nextAliasVersion())
+            invoke.resolve(ret)
+        }
+    }
+
+    @Command
+    fun wrapNewAlias(invoke: Invoke) {
+        guard(invoke) {
+            val args = invoke.parseArgs(VersionDataArgs::class.java)
+            val ret = JSObject()
+            ret.put("data", Hex.encode(vault.wrapWithNewAlias(args.version, Hex.decode(args.data))))
+            invoke.resolve(ret)
+        }
+    }
+
+    @Command
+    fun deleteAlias(invoke: Invoke) {
+        guard(invoke) {
+            vault.deleteAlias(invoke.parseArgs(VersionArgs::class.java).version)
             invoke.resolve(JSObject())
+        }
+    }
+
+    @Command
+    fun pruneBelow(invoke: Invoke) {
+        guard(invoke) {
+            vault.pruneBelow(invoke.parseArgs(VersionArgs::class.java).version)
+            invoke.resolve(JSObject())
+        }
+    }
+
+    /** Runs `work`; any failure is classified like every other Keystore failure. */
+    private fun guard(invoke: Invoke, work: () -> Unit) {
+        try {
+            work()
         } catch (e: Exception) {
-            invoke.reject("keystore")
+            when (classify(e)) {
+                KeyFailure.KEY_GONE -> invoke.reject("keystore", "key_gone")
+                KeyFailure.TRANSIENT -> invoke.reject("keystore")
+            }
         }
     }
 

@@ -999,7 +999,7 @@ Dari `/security-review` dan tinjauan adversarial manual. Tiga aturan baru ada di
 | **F1** `UnrecoverableKeyException` dianggap permanen | `KeyFailures.kt`: hanya **alias hilang, kunci tidak valid permanen (`KeyPermanentlyInvalidatedException`), blob terlalu pendek, atau tag GCM gagal dua kali** yang `key_gone`. `UnrecoverableKeyException`, `UserNotAuthenticatedException`, `KeyStoreException`, `ProviderException`, `IllegalBlockSizeException`, dan semua yang tidak dikenal adalah sementara. `unwrap` mencoba ulang sekali bila tag gagal. Di Rust hanya kode `key_gone` yang menjadi `KeyGone` | 10 tes JVM Kotlin (satu per jenis galat, dijalankan CI) + 2 tes Rust |
 | **F4** `Path::exists()` menelan galat | `fs::metadata`; hanya `NotFound` berarti tidak ada. Galat lain (izin, bukan direktori, I/O) = `Unavailable`, yaitu "Coba lagi": tidak ada layar pemulihan, tidak ada first run, tidak ada berkas berubah | tes bukan-direktori dan izin ditolak |
 | **F2** Pemulihan destruktif tanpa PIN | Dengan `lock.json` valid dan terbaca: **PIN lebih dulu** (`recovery_authenticate`, memakai batas percobaan yang sama, berlaku 5 menit di memori) sebelum "restore menimpa" atau "mulai dari awal" ditawarkan; **kata `HAPUS` diketik** (dicek backend). **Satu pemeriksaan ulang** (`vault::recheck`) tepat sebelum menghancurkan apa pun: bila data ternyata terbuka, atau keadaannya tak bisa dipastikan, perintah dibatalkan tanpa perubahan. `lock.json` rusak tidak dapat diperiksa dan tidak memblokir | tes kewenangan, kedaluwarsa, PIN salah dihitung, recheck untuk tiap keadaan, kata konfirmasi (Rust + UI) |
-| **F3** Kunci Keystore dihapus lebih dulu | Restore-menimpa dan "mulai dari awal" kini **satu jalur** (`commit_recovery`): (1) DB staged sudah ada dan terverifikasi (atau DB kosong baru); (2) kunci DB dibungkus lalu **dibuka lagi** untuk membuktikannya; (3) `money.db` dan `db.key` ditukar **bersama** (lama disimpan sebagai `*.old`, kunci baru lewat `db.key.new`), tiap kegagalan mengembalikan semuanya; (4) berkas baru dibuka dan dibandingkan dengan isi staged, **baru sesudah itu** berkas lama dihapus dan `lock.json` dihapus terakhir. Kunci Keystore di-reset **hanya** bila kunci lama memang tidak bisa dipakai (`key_unusable`: tak ada yang bisa dibaca dengannya, dan hanya ada satu kunci di bawah satu nama). Pada alasan lain kunci yang ada membungkus kunci DB baru tanpa menghapus apa pun | injeksi kegagalan di setiap dari 5 langkah (data lama utuh dan terbaca); crash sebelum tiap langkah dipulihkan menjadi lama **atau** baru, tidak pernah campuran; undo setelah verifikasi gagal, termasuk menghapus berkas baru bila tak ada yang lama |
+| **F3** Kunci Keystore dihapus lebih dulu | Restore-menimpa dan "mulai dari awal" kini **satu jalur** (`commit_recovery`): (1) DB staged sudah ada dan terverifikasi (atau DB kosong baru); (2) kunci DB dibungkus lalu **dibuka lagi** untuk membuktikannya; (3) `money.db` dan `db.key` ditukar **bersama** (lama disimpan sebagai `*.old`, kunci baru lewat `db.key.new`), tiap kegagalan mengembalikan semuanya; (4) berkas baru dibuka dan dibandingkan dengan isi staged, **baru sesudah itu** berkas lama dihapus dan `lock.json` dihapus terakhir. Pengecualian untuk `key_unusable` **dihapus** (tindak lanjut, §27): alias Keystore bernomor versi, jadi kunci baru selalu dibungkus dengan alias **baru** dan alias lama tidak disentuh sampai data baru terverifikasi | injeksi kegagalan di setiap dari 5 langkah (data lama utuh dan terbaca); crash sebelum tiap langkah dipulihkan menjadi lama **atau** baru, tidak pernah campuran; undo setelah verifikasi gagal, termasuk menghapus berkas baru bila tak ada yang lama |
 | **F13** `.old` dipulihkan karena galat sementara | `recover_interrupted` memakai probe tiga nilai. **Pulihkan yang lama hanya pada jawaban pasti**: `db.key.new` masih ada, DB aktif hilang, atau probe `Corrupt` (bukan database, blob kunci tak terpakai permanen). Probe `Opens` menghapus yang lama (sisa `.old` tak pernah menghidupkan data basi). **Probe `Unknown`** (Keystore sibuk, galat I/O, berkas terkunci, galat pemeriksaan) **tidak memindahkan atau menghapus apa pun** dan pembukaan melapor "coba lagi". Pasangan dinilai sebelum berkas diklasifikasi | tes untuk tiap hasil, `.old` basi + galat sementara, dan pembukaan yang tak diputuskan tidak mengubah satu berkas pun |
 
 ### Matriks keadaan setelah perubahan
@@ -1025,3 +1025,32 @@ Berkas yang diperiksa: `money.db` (tidak kosong, atau `money.db.old` ada), `db.k
 Sebelum tindakan destruktif mana pun, keadaan diperiksa sekali lagi. Hasil `Readable` atau `Transient` membatalkan tanpa perubahan; hanya `StillUnreadable` (termasuk "tidak ada apa-apa lagi") yang dilanjutkan.
 
 **Batas yang diketahui:** `UnrecoverableKeyException` yang sebenarnya permanen (entri Keystore rusak) kini selalu tampil sebagai "Coba lagi" dan pengguna harus menghapus data aplikasi lewat pengaturan Android. Itu pilihan sadar: lebih baik buntu daripada menawarkan "mulai dari awal" karena galat yang mungkin sementara.
+
+---
+
+## 27. Tindak lanjut kelompok 1 (2026-10-16)
+
+### Alias Keystore bernomor versi: "hancurkan paling akhir" tanpa pengecualian
+
+Sebelumnya `key_unusable` me-reset satu-satunya kunci lebih dulu. Kini alias bernama `money_tracker_db_key_wrap_v<N>` dan blob kunci terbungkus diawali satu byte yang menyebut alias pembungkusnya (`version(1) || iv(12) || ciphertext+tag`).
+
+| Hal | Aturan |
+|---|---|
+| Kunci pertama | first run membuat `v1` |
+| Mengganti kunci | `next_alias_version` = di atas semua alias yang ada (tidak pernah dipakai ulang); `wrap_new_alias` membuat alias **baru** dan membungkus dengannya; alias lama tidak disentuh |
+| `unwrap` | memakai alias yang disebut blob; tidak pernah membuat kunci |
+| Menghapus alias lama | hanya **setelah** data baru terverifikasi (`prune_aliases_below`); kegagalan di sini meninggalkan alias basi yang tidak berbahaya |
+| Pembersihan | setelah pembukaan yang berhasil dan pasangan berkas tenang, alias yang lebih lama dari alias `db.key` dihapus; alias yang lebih baru (penggantian belum selesai) tidak disentuh |
+| `reset` | dihapus dari plugin |
+
+`vault::replace_data` (diuji dengan Keystore palsu): buat alias baru → bungkus → buka lagi dan bandingkan → tukar berkas bersama → verifikasi → hapus berkas dan alias lama. **Injeksi kegagalan di tiap langkah** (buat alias, round-trip, lima langkah pertukaran, verifikasi): alias lama tetap ada, `db.key` dan `money.db` tidak berubah, data lama masih terbaca, alias baru dihapus lagi, tidak ada marker tersisa, dan DB staged selamat (kini dikembalikan ke tempatnya saat undo, bukan dihapus). Juga: kegagalan menghapus alias lama setelah sukses tidak kehilangan data dan dibersihkan di start berikutnya; start tidak pernah menghapus alias yang masih dibutuhkan; penggantian tanpa pasangan lama juga bersih.
+
+Tes Kotlin JVM (18 total): penamaan alias, alias asing diabaikan, versi tidak dipakai ulang dan tidak berputar, hanya versi lebih lama yang basi, blob cacat ditolak.
+
+### Panduan saat "Coba lagi" terus gagal
+
+Setelah tiga kegagalan beruntun layar menampilkan penjelasan, tanpa tindakan destruktif: data tidak dapat dibuka sementara ini, cadangan adalah satu-satunya jalan pemulihan, dan langkahnya (mulai ulang ponsel; hapus data aplikasi lewat pengaturan Android; lalu Pulihkan dari cadangan; tanpa cadangan data tidak dapat dipulihkan).
+
+### Dicatat untuk kelompok 3
+
+Masa berlaku konfirmasi PIN pemulihan (5 menit) terlalu lama untuk tindakan yang menghapus data. Disamakan dengan mekanisme PIN ulang F11 (sekitar 60 detik).

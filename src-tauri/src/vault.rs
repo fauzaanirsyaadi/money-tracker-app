@@ -185,11 +185,14 @@ pub fn open_database<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultError> {
     // Held across key load/creation *and* open, so a second caller sees the
     // finished database rather than racing the first run.
     let _guard = KEY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    open_in_dir(
+    let db = open_in_dir(
         &dir,
         |plain| Ok(keystore.wrap(plain)?),
         |blob| Ok(keystore.unwrap(blob)?),
-    )
+    )?;
+    // The pair is settled: an alias left over from an earlier replacement can go.
+    prune_stale_aliases(&dir, &PluginKeys(app));
+    Ok(db)
 }
 
 type Wrap<'a> = dyn Fn(&[u8]) -> Result<Vec<u8>, VaultError> + 'a;
@@ -352,6 +355,147 @@ pub fn open_current_pair<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultErro
         .try_into()
         .map_err(|_| VaultError::Recovery(RecoveryReason::KeyUnusable))?;
     Ok(Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes))?)
+}
+
+/// The Keystore operations that replacing the data needs. Behind a trait so the
+/// whole sequence, including failures at every step, is tested with a fake.
+pub trait KeyBackend {
+    /// The version a replacement key gets: above every existing alias.
+    fn next_version(&self) -> Result<u8, VaultError>;
+    /// Creates the alias `version` and wraps `plain` with it; older aliases stay.
+    fn wrap_new(&self, version: u8, plain: &[u8]) -> Result<Vec<u8>, VaultError>;
+    fn unwrap(&self, blob: &[u8]) -> Result<Vec<u8>, VaultError>;
+    /// Best effort: a failure leaves an unused alias, which is harmless.
+    fn delete(&self, version: u8);
+    /// Best effort: deletes every alias older than `keep`.
+    fn prune_below(&self, keep: u8);
+}
+
+/// The real Keystore.
+pub struct PluginKeys<'a, R: Runtime>(pub &'a AppHandle<R>);
+
+impl<R: Runtime> KeyBackend for PluginKeys<'_, R> {
+    fn next_version(&self) -> Result<u8, VaultError> {
+        Ok(self.0.mt_keystore().next_alias_version()?)
+    }
+
+    fn wrap_new(&self, version: u8, plain: &[u8]) -> Result<Vec<u8>, VaultError> {
+        Ok(self.0.mt_keystore().wrap_new_alias(version, plain)?)
+    }
+
+    fn unwrap(&self, blob: &[u8]) -> Result<Vec<u8>, VaultError> {
+        Ok(self.0.mt_keystore().unwrap(blob)?)
+    }
+
+    fn delete(&self, version: u8) {
+        let _ = self.0.mt_keystore().delete_alias(version);
+    }
+
+    fn prune_below(&self, keep: u8) {
+        let _ = self.0.mt_keystore().prune_aliases_below(keep);
+    }
+}
+
+/// The steps of [`replace_data`]. Tests fail each one to prove the old data
+/// stays readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceStep {
+    CreateAlias,
+    RoundTrip,
+    Swap(crate::backup::SwapStep),
+    Verify,
+    /// After success: deleting the old aliases. Cannot undo anything.
+    PruneOldAliases,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceError {
+    /// Something failed; everything is as it was before.
+    Failed,
+    /// The new data did not match what was staged; undone, as it was before.
+    Unverified,
+}
+
+/// Replaces unreadable (or missing) data with `staged`, keyed by `new_key`.
+///
+/// Destroy last, with no exception. Nothing old is deleted until the new data
+/// is verified:
+/// 1. a **new** Keystore alias is created and wraps the new key (the old alias
+///    is untouched, so the old data stays readable if it ever was);
+/// 2. the wrapped key is unwrapped again and compared;
+/// 3. `money.db` and `db.key` are swapped together, old ones kept as `*.old`;
+/// 4. `verify` opens the new files and compares them with what was staged;
+/// 5. only then the old files and the old aliases are deleted.
+///
+/// Any failure up to step 4 removes the new alias and puts the old files back.
+pub fn replace_data(
+    dir: &Path,
+    keys: &dyn KeyBackend,
+    staged: &Path,
+    new_key: &[u8],
+    mut hook: impl FnMut(ReplaceStep) -> io::Result<()>,
+    verify: impl FnOnce() -> bool,
+) -> Result<(), ReplaceError> {
+    hook(ReplaceStep::CreateAlias).map_err(|_| ReplaceError::Failed)?;
+    let version = keys.next_version().map_err(|_| ReplaceError::Failed)?;
+    let blob = keys
+        .wrap_new(version, new_key)
+        .map_err(|_| ReplaceError::Failed)?;
+    // From here on a failure also removes the alias just made.
+    let drop_new_alias = || keys.delete(version);
+
+    if hook(ReplaceStep::RoundTrip).is_err() {
+        drop_new_alias();
+        return Err(ReplaceError::Failed);
+    }
+    match keys.unwrap(&blob) {
+        Ok(round_trip) if round_trip.as_slice() == new_key => {}
+        _ => {
+            drop_new_alias();
+            return Err(ReplaceError::Failed);
+        }
+    }
+
+    let record = match crate::backup::swap_with(dir, staged, Some(&blob), |step| {
+        hook(ReplaceStep::Swap(step))
+    }) {
+        Ok(record) => record,
+        Err(_) => {
+            drop_new_alias();
+            return Err(ReplaceError::Failed);
+        }
+    };
+
+    if hook(ReplaceStep::Verify).is_err() || !verify() {
+        // Back to the old files; the old alias was never touched.
+        let _ = crate::backup::undo_recorded(dir, &record);
+        drop_new_alias();
+        return Err(ReplaceError::Unverified);
+    }
+
+    crate::backup::finish_swap(dir);
+    // Only now does the old alias go. A failure here leaves a stale alias that
+    // the next start removes; it cannot lose data.
+    if hook(ReplaceStep::PruneOldAliases).is_ok() {
+        keys.prune_below(version);
+    }
+    Ok(())
+}
+
+/// The alias version a wrapped key names (its first byte).
+pub fn blob_alias_version(blob: &[u8]) -> Option<u8> {
+    blob.first().copied().filter(|version| *version != 0)
+}
+
+/// Removes aliases older than the one `db.key` uses, after a successful open.
+/// Best effort; only runs when the pair is settled (no swap markers).
+pub fn prune_stale_aliases(dir: &Path, keys: &dyn KeyBackend) {
+    let Ok(blob) = fs::read(dir.join(KEY_FILE)) else {
+        return;
+    };
+    if let Some(version) = blob_alias_version(&blob) {
+        keys.prune_below(version);
+    }
 }
 
 /// A fresh random database key, for a restore that replaces unreadable data.
@@ -949,5 +1093,345 @@ mod tests {
             "Nilai lama",
             "rolled back to the old pair"
         );
+    }
+
+    // --- versioned aliases: replacing the data without an exception to "destroy last" ---
+
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeMap as Map,
+    };
+
+    use crate::backup::SwapStep;
+
+    /// A Keystore stand-in with versioned aliases. A blob is `version || bytes
+    /// xor key(version)`, and it only opens while its alias exists.
+    #[derive(Default)]
+    struct FakeKeys {
+        aliases: RefCell<Map<u8, u8>>, // version -> key byte
+        fail_create: Cell<bool>,
+        wrong_round_trip: Cell<bool>,
+    }
+
+    impl FakeKeys {
+        fn with_alias(version: u8) -> Self {
+            let keys = Self::default();
+            keys.aliases
+                .borrow_mut()
+                .insert(version, version.wrapping_mul(31).wrapping_add(7));
+            keys
+        }
+
+        fn versions(&self) -> Vec<u8> {
+            self.aliases.borrow().keys().copied().collect()
+        }
+
+        fn blob(&self, version: u8, plain: &[u8]) -> Vec<u8> {
+            let byte = self.aliases.borrow()[&version];
+            let mut blob = vec![version];
+            blob.extend(plain.iter().map(|b| b ^ byte));
+            blob
+        }
+    }
+
+    impl KeyBackend for FakeKeys {
+        fn next_version(&self) -> Result<u8, VaultError> {
+            Ok(self
+                .aliases
+                .borrow()
+                .keys()
+                .next_back()
+                .map_or(1, |v| v + 1))
+        }
+
+        fn wrap_new(&self, version: u8, plain: &[u8]) -> Result<Vec<u8>, VaultError> {
+            if self.fail_create.get() {
+                return Err(VaultError::Unavailable);
+            }
+            assert!(
+                !self.aliases.borrow().contains_key(&version),
+                "a version must never be reused"
+            );
+            self.aliases
+                .borrow_mut()
+                .insert(version, version.wrapping_mul(31).wrapping_add(7));
+            Ok(self.blob(version, plain))
+        }
+
+        fn unwrap(&self, blob: &[u8]) -> Result<Vec<u8>, VaultError> {
+            let (&version, body) = blob
+                .split_first()
+                .ok_or(VaultError::Recovery(RecoveryReason::KeyUnusable))?;
+            let byte = *self
+                .aliases
+                .borrow()
+                .get(&version)
+                .ok_or(VaultError::Recovery(RecoveryReason::KeyUnusable))?;
+            let mut plain: Vec<u8> = body.iter().map(|b| b ^ byte).collect();
+            if self.wrong_round_trip.get() {
+                plain[0] ^= 1;
+            }
+            Ok(plain)
+        }
+
+        fn delete(&self, version: u8) {
+            self.aliases.borrow_mut().remove(&version);
+        }
+
+        fn prune_below(&self, keep: u8) {
+            self.aliases
+                .borrow_mut()
+                .retain(|version, _| *version >= keep);
+        }
+    }
+
+    const OLD_KEY: [u8; 32] = [4; 32];
+    const NEW_KEY: [u8; 32] = [9; 32];
+
+    /// An old pair (alias v1) in `dir`, and a staged database under NEW_KEY.
+    fn old_pair(tag: &str) -> (TempDir, FakeKeys, PathBuf) {
+        let dir = TempDir::new(tag);
+        let keys = FakeKeys::with_alias(1);
+        make_db(&dir.0.join(DB_FILE), OLD_KEY, "Lama");
+        fs::write(dir.0.join(KEY_FILE), keys.blob(1, &OLD_KEY)).unwrap();
+        let staged = dir.0.join("restore-staged.db");
+        make_db(&staged, NEW_KEY, "Baru");
+        (dir, keys, staged)
+    }
+
+    fn account_name(dir: &Path, keys: &FakeKeys) -> Option<String> {
+        let db = open_with(dir, fake_wrap, |blob| keys.unwrap(blob)).ok()?;
+        db.accounts(false).ok()?.first().map(|a| a.name.clone())
+    }
+
+    fn no_markers(dir: &Path) -> bool {
+        ["money.db.old", "db.key.old", "db.key.new"]
+            .iter()
+            .all(|name| !dir.join(name).exists())
+    }
+
+    fn verify_opens(dir: &Path, keys: &FakeKeys) -> impl FnOnce() -> bool {
+        let dir = dir.to_path_buf();
+        // The fake backend is not Send; capture only what is needed.
+        let blob_path = dir.join(KEY_FILE);
+        let versions = keys.aliases.borrow().clone();
+        move || {
+            let Ok(blob) = fs::read(&blob_path) else {
+                return false;
+            };
+            let Some((&version, body)) = blob.split_first() else {
+                return false;
+            };
+            let Some(&byte) = versions
+                .get(&version)
+                .or(Some(&(version.wrapping_mul(31).wrapping_add(7))))
+            else {
+                return false;
+            };
+            let plain: Vec<u8> = body.iter().map(|b| b ^ byte).collect();
+            let Ok(bytes) = <[u8; 32]>::try_from(plain.as_slice()) else {
+                return false;
+            };
+            Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes)).is_ok()
+        }
+    }
+
+    const ALL_STEPS: [ReplaceStep; 9] = [
+        ReplaceStep::CreateAlias,
+        ReplaceStep::RoundTrip,
+        ReplaceStep::Swap(SwapStep::WriteNewKey),
+        ReplaceStep::Swap(SwapStep::MoveDbAside),
+        ReplaceStep::Swap(SwapStep::MoveKeyAside),
+        ReplaceStep::Swap(SwapStep::PromoteKey),
+        ReplaceStep::Swap(SwapStep::MoveStagedIn),
+        ReplaceStep::Verify,
+        ReplaceStep::PruneOldAliases,
+    ];
+
+    #[test]
+    fn a_replacement_uses_a_new_alias_and_deletes_the_old_one_only_at_the_end() {
+        let (dir, keys, staged) = old_pair("alias-ok");
+        let mut seen_old_alias_at_verify = false;
+        let versions_at_verify = RefCell::new(Vec::new());
+        let result = replace_data(
+            &dir.0,
+            &keys,
+            &staged,
+            &NEW_KEY,
+            |step| {
+                if step == ReplaceStep::Verify {
+                    seen_old_alias_at_verify = true;
+                    *versions_at_verify.borrow_mut() = keys.versions();
+                }
+                Ok(())
+            },
+            verify_opens(&dir.0, &keys),
+        );
+        assert_eq!(result, Ok(()));
+        assert!(seen_old_alias_at_verify);
+        assert_eq!(
+            *versions_at_verify.borrow(),
+            vec![1, 2],
+            "both aliases exist until the new data is verified"
+        );
+        assert_eq!(keys.versions(), vec![2], "the old alias is deleted last");
+        assert_eq!(account_name(&dir.0, &keys).as_deref(), Some("Baru"));
+        assert!(no_markers(&dir.0));
+    }
+
+    #[test]
+    fn a_failure_at_any_step_leaves_the_old_alias_and_the_old_data_readable() {
+        for failing in ALL_STEPS {
+            if failing == ReplaceStep::PruneOldAliases {
+                continue; // after success: covered by its own test
+            }
+            let (dir, keys, staged) = old_pair("alias-fail");
+            let old_db = fs::read(dir.0.join(DB_FILE)).unwrap();
+            let old_key = fs::read(dir.0.join(KEY_FILE)).unwrap();
+
+            let result = replace_data(
+                &dir.0,
+                &keys,
+                &staged,
+                &NEW_KEY,
+                |step| {
+                    if step == failing {
+                        Err(io::Error::other("injected"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                verify_opens(&dir.0, &keys),
+            );
+
+            assert!(result.is_err(), "{failing:?}");
+            assert_eq!(
+                keys.versions(),
+                vec![1],
+                "{failing:?}: only the old alias may remain"
+            );
+            assert_eq!(
+                fs::read(dir.0.join(DB_FILE)).unwrap(),
+                old_db,
+                "{failing:?}: database"
+            );
+            assert_eq!(
+                fs::read(dir.0.join(KEY_FILE)).unwrap(),
+                old_key,
+                "{failing:?}: key blob"
+            );
+            assert_eq!(
+                account_name(&dir.0, &keys).as_deref(),
+                Some("Lama"),
+                "{failing:?}: old data readable"
+            );
+            assert!(no_markers(&dir.0), "{failing:?}");
+            assert!(staged.exists(), "{failing:?}: the staged database survives");
+        }
+    }
+
+    #[test]
+    fn creating_the_alias_failing_changes_nothing_at_all() {
+        let (dir, keys, staged) = old_pair("alias-create");
+        keys.fail_create.set(true);
+        let result = replace_data(&dir.0, &keys, &staged, &NEW_KEY, |_| Ok(()), || true);
+        assert_eq!(result, Err(ReplaceError::Failed));
+        assert_eq!(keys.versions(), vec![1]);
+        assert_eq!(account_name(&dir.0, &keys).as_deref(), Some("Lama"));
+    }
+
+    #[test]
+    fn a_wrapped_key_that_does_not_open_to_the_same_key_stops_before_any_file_moves() {
+        let (dir, keys, staged) = old_pair("alias-roundtrip");
+        keys.wrong_round_trip.set(true);
+        let before = snapshot(&dir.0);
+        let result = replace_data(&dir.0, &keys, &staged, &NEW_KEY, |_| Ok(()), || true);
+        assert_eq!(result, Err(ReplaceError::Failed));
+        assert_eq!(keys.versions(), vec![1], "the new alias is removed again");
+        assert_eq!(snapshot(&dir.0), before, "no file moved");
+    }
+
+    #[test]
+    fn a_failed_verification_undoes_everything_including_the_new_alias() {
+        let (dir, keys, staged) = old_pair("alias-verify");
+        let result = replace_data(&dir.0, &keys, &staged, &NEW_KEY, |_| Ok(()), || false);
+        assert_eq!(result, Err(ReplaceError::Unverified));
+        assert_eq!(keys.versions(), vec![1]);
+        assert_eq!(account_name(&dir.0, &keys).as_deref(), Some("Lama"));
+        assert!(no_markers(&dir.0));
+    }
+
+    #[test]
+    fn a_failure_while_deleting_the_old_alias_cannot_lose_data_and_is_cleaned_up_later() {
+        let (dir, keys, staged) = old_pair("alias-prune");
+        let result = replace_data(
+            &dir.0,
+            &keys,
+            &staged,
+            &NEW_KEY,
+            |step| {
+                if step == ReplaceStep::PruneOldAliases {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            },
+            verify_opens(&dir.0, &keys),
+        );
+        assert_eq!(result, Ok(()), "the data was already replaced and verified");
+        assert_eq!(keys.versions(), vec![1, 2], "the stale alias lingers");
+        assert_eq!(account_name(&dir.0, &keys).as_deref(), Some("Baru"));
+
+        // The next successful start removes it.
+        prune_stale_aliases(&dir.0, &keys);
+        assert_eq!(keys.versions(), vec![2]);
+        assert_eq!(account_name(&dir.0, &keys).as_deref(), Some("Baru"));
+    }
+
+    #[test]
+    fn startup_never_deletes_the_alias_the_data_still_needs() {
+        let (dir, keys, _staged) = old_pair("alias-prune-keep");
+        prune_stale_aliases(&dir.0, &keys);
+        assert_eq!(keys.versions(), vec![1], "v1 wraps the current db.key");
+        // A newer alias that nothing uses yet (an unfinished replacement) is not touched either.
+        keys.aliases.borrow_mut().insert(2, 99);
+        prune_stale_aliases(&dir.0, &keys);
+        assert_eq!(keys.versions(), vec![1, 2]);
+    }
+
+    #[test]
+    fn replacing_lost_data_with_nothing_old_to_keep_also_works_and_undoes_cleanly() {
+        // "database missing" or "key missing": there may be no old pair at all.
+        let dir = TempDir::new("alias-nothing");
+        let keys = FakeKeys::default();
+        let staged = dir.0.join("restore-staged.db");
+        make_db(&staged, NEW_KEY, "Baru");
+        let result = replace_data(
+            &dir.0,
+            &keys,
+            &staged,
+            &NEW_KEY,
+            |_| Ok(()),
+            verify_opens(&dir.0, &keys),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(keys.versions(), vec![1]);
+        assert_eq!(account_name(&dir.0, &keys).as_deref(), Some("Baru"));
+
+        let dir = TempDir::new("alias-nothing-undo");
+        let keys = FakeKeys::default();
+        let staged = dir.0.join("restore-staged.db");
+        make_db(&staged, NEW_KEY, "Baru");
+        let result = replace_data(&dir.0, &keys, &staged, &NEW_KEY, |_| Ok(()), || false);
+        assert_eq!(result, Err(ReplaceError::Unverified));
+        assert!(keys.versions().is_empty(), "the unused alias is removed");
+        assert!(!dir.0.join(DB_FILE).exists() && !dir.0.join(KEY_FILE).exists());
+    }
+
+    #[test]
+    fn a_blob_names_the_alias_that_wrapped_it() {
+        assert_eq!(blob_alias_version(&[3, 1, 2]), Some(3));
+        assert_eq!(blob_alias_version(&[0, 1, 2]), None);
+        assert_eq!(blob_alias_version(&[]), None);
     }
 }

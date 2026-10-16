@@ -24,7 +24,19 @@ impl<R: Runtime> MtKeystore<R> {
         Err(Error::Unsupported)
     }
 
-    pub fn reset(&self) -> Result<()> {
+    pub fn next_alias_version(&self) -> Result<u8> {
+        Err(Error::Unsupported)
+    }
+
+    pub fn wrap_new_alias(&self, _version: u8, _plain: &[u8]) -> Result<Vec<u8>> {
+        Err(Error::Unsupported)
+    }
+
+    pub fn delete_alias(&self, _version: u8) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+
+    pub fn prune_aliases_below(&self, _keep: u8) -> Result<()> {
         Err(Error::Unsupported)
     }
 

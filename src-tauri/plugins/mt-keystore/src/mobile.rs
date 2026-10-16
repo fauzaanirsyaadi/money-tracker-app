@@ -22,6 +22,22 @@ struct DataRequest {
 #[derive(Deserialize)]
 struct Empty {}
 
+#[derive(Serialize)]
+struct Version {
+    version: u32,
+}
+
+#[derive(Serialize)]
+struct VersionedData {
+    version: u32,
+    data: String,
+}
+
+#[derive(Deserialize)]
+struct VersionResponse {
+    version: u32,
+}
+
 #[derive(Deserialize)]
 struct DataResponse {
     data: String,
@@ -46,10 +62,43 @@ impl<R: Runtime> MtKeystore<R> {
         self.call("unwrap", blob)
     }
 
-    /// Deletes the wrapping key. Only for a restore that replaces data the old
-    /// key can no longer open, after the user confirmed.
-    pub fn reset(&self) -> Result<()> {
-        let _: Empty = self.0.run_mobile_plugin("reset", ())?;
+    /// The alias version a replacement key will get (one above every existing alias).
+    pub fn next_alias_version(&self) -> Result<u8> {
+        let response: VersionResponse = self.0.run_mobile_plugin("nextAliasVersion", ())?;
+        u8::try_from(response.version).map_err(|_| Error::BadResponse)
+    }
+
+    /// Creates the alias `version` and wraps `plain` with it. Every older alias
+    /// stays as it is, so data wrapped with it remains readable.
+    pub fn wrap_new_alias(&self, version: u8, plain: &[u8]) -> Result<Vec<u8>> {
+        let request = VersionedData {
+            version: u32::from(version),
+            data: hex::encode(plain),
+        };
+        let response: DataResponse = self.0.run_mobile_plugin("wrapNewAlias", request)?;
+        hex::decode(&response.data).ok_or(Error::BadResponse)
+    }
+
+    /// Deletes one alias. For an unused new alias, or an old one after the new
+    /// data was verified.
+    pub fn delete_alias(&self, version: u8) -> Result<()> {
+        let _: Empty = self.0.run_mobile_plugin(
+            "deleteAlias",
+            Version {
+                version: u32::from(version),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Deletes every alias older than `keep`.
+    pub fn prune_aliases_below(&self, keep: u8) -> Result<()> {
+        let _: Empty = self.0.run_mobile_plugin(
+            "pruneBelow",
+            Version {
+                version: u32::from(keep),
+            },
+        )?;
         Ok(())
     }
 

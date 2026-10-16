@@ -176,7 +176,8 @@ struct Progress {
     db_moved: bool,
     key_moved: bool,
     key_promoted: bool,
-    staged_in: bool,
+    /// Where the staged database was moved from, once it has been moved in.
+    staged_from: Option<PathBuf>,
 }
 
 /// Replaces the live database with `staged`, keeping the old one aside as
@@ -259,7 +260,7 @@ fn run_swap(
     }
     hook(SwapStep::MoveStagedIn)?;
     rename_set(staged, &live)?;
-    progress.staged_in = true;
+    progress.staged_from = Some(staged.to_path_buf());
     Ok(())
 }
 
@@ -267,8 +268,12 @@ fn run_swap(
 fn restore_old(dir: &Path, progress: &Progress) -> io::Result<()> {
     let live = dir.join(LIVE_DB);
     let key = dir.join(KEY_FILE);
-    if progress.staged_in {
-        remove_database(&live);
+    if let Some(staged) = &progress.staged_from {
+        // The staged database goes back where it came from rather than being
+        // deleted: a retry does not have to rebuild it.
+        if rename_set(&live, staged).is_err() {
+            remove_database(&live);
+        }
     }
     if progress.key_promoted {
         let _ = fs::remove_file(&key);
