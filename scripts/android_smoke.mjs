@@ -116,6 +116,30 @@ const invokeCode = (command, payload = {}) =>
     `window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(payload)}).then(() => 'ok', (e) => e?.code ?? 'error')`,
   );
 
+// --- Typing that is checked ----------------------------------------------------
+
+/**
+ * Types `text` with real key events and checks what the field really holds,
+ * retrying from an empty field if keystrokes were dropped. Under host load
+ * `adb input text` loses characters; the value is verified, never assumed,
+ * so the assertions on what was saved stay exact.
+ */
+async function typeVerified({ focus, read, clear, text, expected = text, attempts = 5 }) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    await evaluate(focus);
+    adb("shell", "input", "text", text);
+    await sleep(400);
+    const value = await evaluate(read);
+    if (value === expected) return;
+    console.log(`INFO  typing attempt ${attempt} produced ${JSON.stringify(value)}, retrying`);
+    await evaluate(clear);
+  }
+  throw new Error(`could not type ${JSON.stringify(text)} reliably`);
+}
+
+const clearInput = (selector) =>
+  `(() => { const e = ${selector}; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, ''); e.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
 // --- Real taps -------------------------------------------------------------
 
 /** Top of the WebView in device pixels (status bar inset), from the view hierarchy. */
@@ -168,7 +192,7 @@ async function main() {
   });
   check("app started with an inspectable web view", true);
 
-  const note = `smoke-${Date.now()}`; // typed after the amount; may arrive truncated under load
+  const note = `smoke-${Date.now()}`;
   const accounts = await invoke("accounts_list", { includeArchived: false });
   let account = accounts[0];
   if (!account) {
@@ -189,25 +213,30 @@ async function main() {
   check("amount field is focused", true);
 
   // Typing is keyboard entry, not a tap.
-  adb("shell", "input", "text", "25000");
-  await until("amount shown", async () => (await evaluate("document.getElementById('quick-amount')?.value")) === "25.000");
+  await typeVerified({
+    focus: "document.getElementById('quick-amount').focus()",
+    read: "document.getElementById('quick-amount')?.value",
+    clear: clearInput("document.getElementById('quick-amount')"),
+    text: "25000",
+    expected: "25.000",
+  });
   check("typed digits are grouped as 25.000", true);
 
-  await evaluate(
-    "(() => { const i = [...document.querySelectorAll('dialog[open] input')].find(e => e.maxLength === 500); i.focus(); return true; })()",
-  );
-  adb("shell", "input", "text", note);
-  await sleep(500);
+  const noteInput = "[...document.querySelectorAll('dialog[open] input')].find(e => e.maxLength === 500)";
+  await typeVerified({
+    focus: `${noteInput}.focus()`,
+    read: `${noteInput}.value`,
+    clear: clearInput(noteInput),
+    text: note,
+  });
+  check("the note was typed in full", true, note);
 
   // Tap 2: Simpan, pinned above the keyboard.
   await tapElement("dialog[open] footer button[type=submit]", top, dpr);
   await until("sheet closed", async () => !(await evaluate("!!document.querySelector('dialog[open]')")));
   check("tap 2 saves and closes the sheet", true);
 
-  // A fresh install has no other rows, so the saved one is found without the
-  // note: under load `adb input text` can drop characters of the typed note,
-  // which says nothing about the app.
-  const page = await invoke("transactions_list", { filter: {}, cursor: null, limit: 10 });
+  const page = await invoke("transactions_list", { filter: { search: note }, cursor: null, limit: 10 });
   if (page.items.length !== 1) {
     // Say what was saved instead, so a typing glitch is told apart from a lost write.
     const all = await invoke("transactions_list", { filter: {}, cursor: null, limit: 5 });
@@ -219,6 +248,7 @@ async function main() {
   check("it is an expense", row.kind === "expense", row.kind);
   check("it used the only account", row.accountId === account.id, row.accountName);
   check("it has a category", typeof row.categoryName === "string" && row.categoryName.length > 0, row.categoryName);
+  check("the note was saved exactly as typed", row.note === note, row.note);
 
   const dialogs = adb("shell", "dumpsys", "window", "windows");
   check("no ANR dialog on screen", !/Application Not Responding/i.test(dialogs));
@@ -297,8 +327,13 @@ async function biometricFlow() {
 async function lockFlow(top, dpr) {
   const typeInto = async (text) => {
     await tapElement("#lock-pin", top, dpr);
-    adb("shell", "input", "text", text);
-    await sleep(300);
+    // The field must hold exactly the PIN before it is submitted.
+    await typeVerified({
+      focus: "document.querySelector('#lock-pin').focus()",
+      read: "document.querySelector('#lock-pin').value",
+      clear: clearInput("document.querySelector('#lock-pin')"),
+      text,
+    });
     adb("shell", "input", "keyevent", "KEYCODE_BACK"); // hide the keyboard
     await sleep(500);
     await tapElement("form button[type=submit]", top, dpr);
