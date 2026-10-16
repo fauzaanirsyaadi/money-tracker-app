@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { StorageState } from "./api.ts";
-import { recoveryText } from "./recovery.ts";
+import { confirmationMatches, needsPin, recoveryText, START_FRESH_WORD } from "./recovery.ts";
 
 const LOSS: StorageState[] = ["database_missing", "key_missing", "key_unusable", "database_unreadable"];
 
@@ -26,4 +26,21 @@ test("a transient failure only offers trying again and promises nothing was chan
 
 test("a healthy state has no recovery text", () => {
   assert.deepEqual(recoveryText("ok"), { title: "", explanation: "", canRecover: false });
+});
+
+test("only the exact word confirms losing the data", () => {
+  assert.equal(START_FRESH_WORD, "HAPUS");
+  assert.equal(confirmationMatches("HAPUS"), true);
+  assert.equal(confirmationMatches("  HAPUS  "), true);
+  for (const typed of ["", "hapus", "Hapus", "YA", "HAPUS!", "H A P U S"]) {
+    assert.equal(confirmationMatches(typed), false, typed);
+  }
+});
+
+test("the PIN is asked first whenever a valid lock exists and was not just confirmed", () => {
+  assert.equal(needsPin({ configured: true, broken: false, recoveryAuthenticated: false }), true);
+  assert.equal(needsPin({ configured: true, broken: false, recoveryAuthenticated: true }), false);
+  // No lock, or a damaged lock file that cannot be checked against: no PIN to ask for.
+  assert.equal(needsPin({ configured: false, broken: false, recoveryAuthenticated: false }), false);
+  assert.equal(needsPin({ configured: true, broken: true, recoveryAuthenticated: false }), false);
 });

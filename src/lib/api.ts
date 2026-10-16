@@ -101,6 +101,7 @@ export type ErrorCode =
   | "wrong_pin"
   | "locked_out"
   | "cancelled"
+  | "pin_required"
   | "weak_passphrase"
   | "wrong_passphrase"
   | "not_a_backup"
@@ -341,6 +342,8 @@ export interface LockStatus {
   retryAfterMs: number | null;
   /** Whether the stored data can be used; see `StorageState`. */
   storage: StorageState;
+  /** The PIN was confirmed recently for the destructive recovery steps. */
+  recoveryAuthenticated: boolean;
 }
 
 /**
@@ -401,8 +404,14 @@ export const recovery = {
   /** Tries again after a failure that may have passed. */
   retry: () => call<LockStatus>("recovery_retry"),
   /**
-   * Discards unreadable data and starts with an empty database. Only after the
-   * user confirmed that the existing data will be lost.
+   * Confirms the PIN for the destructive recovery steps (restore over the
+   * unreadable data, start fresh). Needed whenever a valid lock exists.
    */
-  startFresh: (confirm: boolean) => call<LockStatus>("recovery_start_fresh", { confirm }),
+  authenticate: (pin: string) => call<LockStatus>("recovery_authenticate", { pin }),
+  /**
+   * Discards unreadable data and starts with an empty database. Needs the PIN
+   * (when a lock exists) and the word typed to confirm that all existing data
+   * will be lost.
+   */
+  startFresh: (typed: string) => call<LockStatus>("recovery_start_fresh", { typed }),
 };

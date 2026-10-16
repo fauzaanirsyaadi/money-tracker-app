@@ -35,6 +35,8 @@ pub struct LockStatusDto {
     /// `ok`, `retry`, or why the data needs recovery: `database_missing`,
     /// `key_missing`, `key_unusable`, `database_unreadable`.
     pub storage: &'static str,
+    /// The PIN was confirmed recently for the destructive recovery steps.
+    pub recovery_authenticated: bool,
 }
 
 impl LockStatusDto {
@@ -42,6 +44,7 @@ impl LockStatusDto {
         snapshot: LockSnapshot,
         biometric: BiometricAvailability,
         storage: &'static str,
+        recovery_authenticated: bool,
     ) -> Self {
         Self {
             configured: snapshot.configured,
@@ -59,6 +62,7 @@ impl LockStatusDto {
                 .retry_after
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             storage,
+            recovery_authenticated,
         }
     }
 }
@@ -105,7 +109,12 @@ pub(crate) async fn status_of(app: &AppHandle) -> LockStatusDto {
         .biometric_availability()
         .await
         .unwrap_or(BiometricAvailability::Unavailable);
-    LockStatusDto::new(snapshot, biometric, storage_label(state.problem()))
+    LockStatusDto::new(
+        snapshot,
+        biometric,
+        storage_label(state.problem()),
+        state.recovery_auth_valid(Instant::now()),
+    )
 }
 
 pub(crate) fn require_unlocked(state: &AppState) -> Result<(), AppError> {

@@ -365,7 +365,14 @@ pub async fn backup_restore_commit(
     blocking(move || {
         let state = app.state::<AppState>();
         match (recovering, fresh_key) {
-            (true, Some(key)) => commit_recovery(&app, &state, &staged, &key),
+            (true, Some(key)) => {
+                // Replacing unreadable data is destructive: the PIN first when a
+                // valid lock exists, and a second look that still finds the data
+                // unreadable.
+                crate::recovery::require_recovery_authority(&state, Instant::now())?;
+                crate::recovery::recheck_before_destroying(&app, &state)?;
+                commit_recovery(&app, &state, &staged, &key)
+            }
             (true, None) => Err(internal()),
             (false, _) => commit(&app, &state, &staged),
         }

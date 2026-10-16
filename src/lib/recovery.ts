@@ -2,6 +2,22 @@
 
 import type { StorageState } from "./api";
 
+/** The word typed to confirm that all existing data will be lost (matches the backend). */
+export const START_FRESH_WORD = "HAPUS";
+
+export function confirmationMatches(typed: string): boolean {
+  return typed.trim() === START_FRESH_WORD;
+}
+
+/** Whether the screen must ask for the PIN before offering anything destructive. */
+export function needsPin(status: {
+  configured: boolean;
+  broken: boolean;
+  recoveryAuthenticated: boolean;
+}): boolean {
+  return status.configured && !status.broken && !status.recoveryAuthenticated;
+}
+
 export interface RecoveryText {
   title: string;
   explanation: string;

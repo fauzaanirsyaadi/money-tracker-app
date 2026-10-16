@@ -37,6 +37,8 @@ export function backupErrorMessage(code: ErrorCode): string {
       return "Cadangan rusak (tidak lengkap atau telah diubah). Data Anda tidak diubah.";
     case "locked":
       return "Aplikasi terkunci. Buka kunci dulu.";
+    case "pin_required":
+      return "Masukkan PIN lagi untuk melanjutkan pemulihan.";
     default:
       return "Tidak berhasil. Data Anda tidak diubah.";
   }

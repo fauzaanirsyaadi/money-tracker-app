@@ -22,6 +22,9 @@
   function fail(err: unknown) {
     if (!(err instanceof ApiError)) throw err;
     restoreError = backupErrorMessage(err.code);
+    // The state may have changed under us (PIN confirmation expired, or the data
+    // turned out to be readable after all): let the screen follow the truth.
+    if (recovering) void refreshLock();
   }
 
   async function pickFile() {

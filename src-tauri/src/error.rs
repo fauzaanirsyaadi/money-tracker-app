@@ -26,6 +26,8 @@ pub enum ErrorCode {
     LockedOut,
     /// The user dismissed a prompt or picker.
     Cancelled,
+    /// The PIN must be entered before this destructive recovery step.
+    PinRequired,
     /// The backup passphrase is too weak to use.
     WeakPassphrase,
     /// Wrong passphrase for this backup (or it was altered).

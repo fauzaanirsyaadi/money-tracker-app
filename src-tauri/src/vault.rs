@@ -208,6 +208,53 @@ fn open_in_dir(
     Ok(Db::open(&dir.join(DB_FILE), &key)?)
 }
 
+/// The answer of a second look right before something destructive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recheck {
+    /// Still lost or unreadable, or nothing exists any more: nothing to protect.
+    StillUnreadable,
+    /// The data opens after all: the problem was a false alarm. Do nothing.
+    Readable,
+    /// Could not tell (a failure that may pass). Do nothing.
+    Transient,
+}
+
+/// Looks again at the storage, one more time, before any destructive recovery
+/// step. Opens and closes the database; never creates anything.
+pub fn recheck<R: Runtime>(app: &AppHandle<R>) -> Recheck {
+    let Ok(dir) = data_dir(app) else {
+        return Recheck::Transient;
+    };
+    let keystore = app.mt_keystore();
+    let _guard = KEY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    recheck_in_dir(
+        &dir,
+        |plain| Ok(keystore.wrap(plain)?),
+        |blob| Ok(keystore.unwrap(blob)?),
+    )
+}
+
+fn recheck_in_dir(
+    dir: &Path,
+    wrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>,
+    unwrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>,
+) -> Recheck {
+    match inspect(dir) {
+        Err(_) => return Recheck::Transient,
+        // Missing pieces stay missing. A first-run look must not create anything.
+        Ok(state) if classify(state) != Startup::Ready => return Recheck::StillUnreadable,
+        Ok(_) => {}
+    }
+    match open_in_dir(dir, wrap, unwrap) {
+        Ok(db) => {
+            drop(db);
+            Recheck::Readable
+        }
+        Err(VaultError::Recovery(_)) => Recheck::StillUnreadable,
+        Err(VaultError::Io | VaultError::Unavailable) => Recheck::Transient,
+    }
+}
+
 /// Key handling: `wrap`/`unwrap` come from the Keystore on Android and from a
 /// fake in tests. A key is created only when `allow_create` is set, which the
 /// caller grants for a true first run alone. The caller must hold [`KEY_LOCK`].
@@ -740,5 +787,82 @@ mod tests {
         assert_eq!(inspect(&dir.0), Ok(state(false, false, false)));
         arrange(&dir.0, true, true, true);
         assert_eq!(inspect(&dir.0), Ok(state(true, true, true)));
+    }
+
+    // --- the second look before destroying anything (review item F2) -------------
+
+    fn recheck_with(dir: &Path, unwrap: impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>) -> Recheck {
+        let _guard = KEY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        recheck_in_dir(dir, fake_wrap, unwrap)
+    }
+
+    #[test]
+    fn a_false_alarm_is_detected_and_nothing_is_touched() {
+        let dir = TempDir::new("recheck-ok");
+        arrange(&dir.0, true, true, true);
+        let before = snapshot(&dir.0);
+        assert_eq!(recheck_with(&dir.0, fake_unwrap), Recheck::Readable);
+        assert_eq!(snapshot(&dir.0), before);
+    }
+
+    #[test]
+    fn a_transient_keystore_failure_is_not_grounds_to_destroy() {
+        let dir = TempDir::new("recheck-busy");
+        arrange(&dir.0, true, true, false);
+        let before = snapshot(&dir.0);
+        let busy = |_: &[u8]| Err(VaultError::Unavailable);
+        assert_eq!(recheck_with(&dir.0, busy), Recheck::Transient);
+        assert_eq!(snapshot(&dir.0), before);
+    }
+
+    #[test]
+    fn real_loss_is_confirmed_for_every_unreadable_state() {
+        // missing database, missing key, unusable key, wrong key.
+        let cases: [(&str, bool, bool, bool); 3] = [
+            ("recheck-nodb", false, true, true),
+            ("recheck-nokey", true, false, false),
+            ("recheck-lockonly", false, false, true),
+        ];
+        for (tag, db, key, lock) in cases {
+            let dir = TempDir::new(tag);
+            arrange(&dir.0, db, key, lock);
+            let before = snapshot(&dir.0);
+            assert_eq!(
+                recheck_with(&dir.0, fake_unwrap),
+                Recheck::StillUnreadable,
+                "{tag}"
+            );
+            assert_eq!(
+                snapshot(&dir.0),
+                before,
+                "{tag}: a recheck must not change anything"
+            );
+        }
+        let dir = TempDir::new("recheck-gone");
+        arrange(&dir.0, true, true, true);
+        let gone = |_: &[u8]| Err(VaultError::Recovery(RecoveryReason::KeyUnusable));
+        assert_eq!(recheck_with(&dir.0, gone), Recheck::StillUnreadable);
+        let dir = TempDir::new("recheck-wrongkey");
+        make_db(&dir.0.join(DB_FILE), [9; 32], "Dompet");
+        fs::write(dir.0.join(KEY_FILE), fake_wrap(&KEY).unwrap()).unwrap();
+        assert_eq!(recheck_with(&dir.0, fake_unwrap), Recheck::StillUnreadable);
+    }
+
+    #[test]
+    fn a_recheck_never_creates_a_first_run_database() {
+        let dir = TempDir::new("recheck-empty");
+        assert_eq!(recheck_with(&dir.0, fake_unwrap), Recheck::StillUnreadable);
+        assert!(
+            snapshot(&dir.0).is_empty(),
+            "nothing may be created by looking"
+        );
+    }
+
+    #[test]
+    fn an_unexaminable_directory_is_transient() {
+        let dir = TempDir::new("recheck-notadir");
+        let file = dir.0.join("f");
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(recheck_with(&file, fake_unwrap), Recheck::Transient);
     }
 }

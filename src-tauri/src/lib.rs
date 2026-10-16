@@ -103,6 +103,7 @@ pub fn run() {
         lock::lock_auto_set,
         lock::lock_now,
         recovery::recovery_retry,
+        recovery::recovery_authenticate,
         recovery::recovery_start_fresh,
         backup_cmd::backup_export,
         backup_cmd::backup_restore_pick,

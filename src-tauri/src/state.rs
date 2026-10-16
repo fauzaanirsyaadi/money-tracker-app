@@ -3,11 +3,15 @@
 use std::{
     path::PathBuf,
     sync::{Mutex, PoisonError},
+    time::{Duration, Instant},
 };
 
 use mt_storage::{Db, DbKey, LogicalSummary};
 
 use crate::{applock::LockService, error::AppError, vault::RecoveryReason};
+
+/// How long a correct PIN keeps the destructive recovery steps available.
+pub const RECOVERY_AUTH_WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// Why the data cannot be used right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +48,8 @@ pub struct AppState {
     lock: LockService,
     restore: Mutex<RestoreSession>,
     problem: Mutex<Option<StorageProblem>>,
+    /// When the PIN was last confirmed on the recovery screen (in memory only).
+    recovery_auth: Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -53,6 +59,7 @@ impl AppState {
             lock,
             restore: Mutex::new(RestoreSession::default()),
             problem: Mutex::new(None),
+            recovery_auth: Mutex::new(None),
         }
     }
 
@@ -62,6 +69,41 @@ impl AppState {
 
     pub fn set_problem(&self, problem: Option<StorageProblem>) {
         *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = problem;
+        if problem.is_none() {
+            // A resolved problem leaves no standing permission behind.
+            self.clear_recovery_auth();
+        }
+    }
+
+    /// Records that the PIN was just confirmed for the destructive recovery steps.
+    pub fn grant_recovery_auth(&self, now: Instant) {
+        *self
+            .recovery_auth
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(now);
+    }
+
+    /// Whether a PIN confirmation is still fresh. An expired one is forgotten.
+    pub fn recovery_auth_valid(&self, now: Instant) -> bool {
+        let mut guard = self
+            .recovery_auth
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match *guard {
+            Some(at) if now.saturating_duration_since(at) < RECOVERY_AUTH_WINDOW => true,
+            Some(_) => {
+                *guard = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn clear_recovery_auth(&self) {
+        *self
+            .recovery_auth
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Whether the data is lost or unreadable and recovery is on offer.

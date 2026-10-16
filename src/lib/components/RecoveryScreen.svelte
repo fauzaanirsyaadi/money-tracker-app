@@ -4,14 +4,41 @@
   import Card from "$lib/components/Card.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import RestoreCard from "$lib/components/RestoreCard.svelte";
-  import { recoveryText } from "$lib/recovery";
-  import { applyLockStatus, dataChanged, lockState, notify } from "$lib/session.svelte";
+  import Field from "$lib/components/Field.svelte";
+  import { confirmationMatches, needsPin, recoveryText, START_FRESH_WORD } from "$lib/recovery";
+  import { applyLockStatus, dataChanged, lockState, notify, refreshLock } from "$lib/session.svelte";
 
   const text = $derived(recoveryText(lockState.status?.storage ?? "ok"));
+  // A valid lock guards the destructive steps: the PIN comes first.
+  const askPin = $derived(lockState.status !== null && needsPin(lockState.status));
 
   let busy = $state(false);
   let message = $state("");
-  let understood = $state(false);
+  let typed = $state("");
+  let pin = $state("");
+
+  async function confirmPin(event: SubmitEvent) {
+    event.preventDefault();
+    if (busy || pin === "") return;
+    busy = true;
+    message = "";
+    const attempt = pin;
+    pin = "";
+    try {
+      applyLockStatus(await recovery.authenticate(attempt));
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      message =
+        err.code === "wrong_pin"
+          ? "PIN salah."
+          : err.code === "locked_out"
+            ? "Terlalu banyak percobaan. Tunggu sebentar."
+            : "Tidak berhasil. Tidak ada yang diubah.";
+      void refreshLock();
+    } finally {
+      busy = false;
+    }
+  }
 
   async function retry() {
     if (busy) return;
@@ -29,16 +56,23 @@
   }
 
   async function startFresh() {
-    if (busy || !understood) return;
+    if (busy || !confirmationMatches(typed)) return;
     busy = true;
     message = "";
     try {
-      applyLockStatus(await recovery.startFresh(true));
+      applyLockStatus(await recovery.startFresh(typed));
       notify("Database baru dibuat. Data lama dibuang.", 7000);
       dataChanged();
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
-      message = "Tidak berhasil memulai dari awal. Tidak ada yang diubah.";
+      message =
+        err.code === "pin_required"
+          ? "Masukkan PIN lagi untuk melanjutkan."
+          : err.code === "invalid_input"
+            ? "Tidak dilanjutkan: data ternyata bisa dibuka lagi, atau konfirmasi tidak sesuai. Tidak ada yang diubah."
+            : "Tidak berhasil memulai dari awal. Tidak ada yang diubah.";
+      // The truth may have changed (data readable again, PIN confirmation expired).
+      void refreshLock();
     } finally {
       busy = false;
     }
@@ -51,7 +85,31 @@
     <h1>{text.title}</h1>
     <p class="explain">{text.explanation}</p>
 
-    {#if text.canRecover}
+    {#if text.canRecover && askPin}
+      <Card>
+        <h2>Masukkan PIN</h2>
+        <p class="muted">
+          Pemulihan dapat membuang data lama. Karena kunci aplikasi aktif, PIN dibutuhkan lebih dulu.
+        </p>
+        <form onsubmit={confirmPin} class="pinform">
+          <label class="sr-only" for="recovery-pin">PIN</label>
+          <input
+            id="recovery-pin"
+            type="password"
+            inputmode="numeric"
+            autocomplete="off"
+            maxlength="16"
+            placeholder="PIN"
+            bind:value={pin}
+            disabled={busy}
+          />
+          {#if message}<p class="error" role="alert">{message}</p>{/if}
+          <Button type="submit" variant="primary" block disabled={busy || pin === ""}>
+            {busy ? "Memeriksa…" : "Lanjutkan"}
+          </Button>
+        </form>
+      </Card>
+    {:else if text.canRecover}
       <RestoreCard recovering />
 
       <Card tone="danger">
@@ -60,12 +118,22 @@
           Membuat database kosong baru. <strong>Semua data lama akan hilang</strong> dan tidak dapat
           dipulihkan, dan PIN diatur ulang. Pakai ini hanya bila tidak punya cadangan.
         </p>
-        <label class="check">
-          <input type="checkbox" bind:checked={understood} disabled={busy} />
-          <span>Saya mengerti: data lama akan hilang permanen.</span>
-        </label>
+        <Field label={`Ketik ${START_FRESH_WORD} untuk mengonfirmasi`}>
+          <input
+            type="text"
+            autocomplete="off"
+            autocapitalize="characters"
+            bind:value={typed}
+            disabled={busy}
+          />
+        </Field>
         {#if message}<p class="error" role="alert">{message}</p>{/if}
-        <Button variant="danger" block disabled={busy || !understood} onclick={startFresh}>
+        <Button
+          variant="danger"
+          block
+          disabled={busy || !confirmationMatches(typed)}
+          onclick={startFresh}
+        >
           {busy ? "Memproses…" : "Buang data lama dan mulai baru"}
         </Button>
       </Card>
@@ -120,17 +188,27 @@
   .muted {
     margin: 0 0 var(--space-3);
   }
-  .check {
-    display: flex;
+  .pinform {
+    display: grid;
     gap: var(--space-3);
-    align-items: flex-start;
-    font-size: var(--fs-sm);
-    margin-bottom: var(--space-3);
   }
-  .check input {
-    width: 1.5rem;
-    height: 1.5rem;
-    flex: none;
+  .pinform input {
+    min-height: var(--tap);
+    padding: 0 var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    text-align: center;
+    font-size: var(--fs-lg);
+    letter-spacing: 0.3em;
+    width: 100%;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
   .error {
     margin: 0 0 var(--space-3);
