@@ -38,7 +38,7 @@ Konsekuensi yang harus dipahami:
 
 Aplikasi **tidak pernah membuat database atau kunci baru secara diam-diam** kecuali pada first run sebenarnya (tidak ada database, kunci terbungkus, maupun `lock.json`). Bila data hilang atau tidak terbaca, layar pemulihan menjelaskan sebabnya dan menawarkan hanya dua jalan, keduanya eksplisit: pulihkan dari cadangan, atau mulai dari awal setelah konfirmasi bahwa data lama akan hilang. Kegagalan yang mungkin sementara (Keystore sibuk) hanya menawarkan "Coba lagi" dan tidak mengubah apa pun. Rinciannya, termasuk matriks keadaan, ada di ARCHITECTURE.md §25.
 
-Layar pemulihan muncul sebelum layar PIN: tanpa data yang terbaca, tidak ada yang perlu dilindungi PIN. Pemulihan menghapus `lock.json`, sehingga PIN dipasang ulang.
+Layar pemulihan muncul sebelum layar PIN, tetapi **tindakan destruktifnya butuh PIN** bila `lock.json` valid dan terbaca (batas percobaan yang sama dengan membuka kunci; konfirmasi berlaku 5 menit di memori), ditambah kata `HAPUS` yang diketik untuk "mulai dari awal". Sebelum menghancurkan apa pun, aplikasi memeriksa ulang sekali: data yang ternyata terbuka, atau keadaan yang tidak bisa dipastikan, membatalkan tindakan. `lock.json` yang rusak tidak dapat diperiksa dan tidak memblokir. Pemulihan menghapus `lock.json` paling akhir, sehingga PIN dipasang ulang. Aturan lengkapnya (galat tak dikenal = sementara; hancurkan paling akhir) ada di CLAUDE.md dan ARCHITECTURE.md §26.
 
 ## Backup terenkripsi
 

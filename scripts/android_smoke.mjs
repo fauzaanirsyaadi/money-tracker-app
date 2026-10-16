@@ -204,9 +204,10 @@ async function main() {
   await until("sheet closed", async () => !(await evaluate("!!document.querySelector('dialog[open]')")));
   check("tap 2 saves and closes the sheet", true);
 
-  // Found by the fixed prefix: under load `adb input text` can drop trailing
-  // characters of the typed note, which says nothing about the app.
-  const page = await invoke("transactions_list", { filter: { search: "smoke-" }, cursor: null, limit: 10 });
+  // A fresh install has no other rows, so the saved one is found without the
+  // note: under load `adb input text` can drop characters of the typed note,
+  // which says nothing about the app.
+  const page = await invoke("transactions_list", { filter: {}, cursor: null, limit: 10 });
   if (page.items.length !== 1) {
     // Say what was saved instead, so a typing glitch is told apart from a lost write.
     const all = await invoke("transactions_list", { filter: {}, cursor: null, limit: 5 });

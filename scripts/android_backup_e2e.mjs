@@ -243,7 +243,7 @@ async function damageAndStart(damage) {
   await startApp();
 }
 
-async function restoreThroughPicker(before, label) {
+async function restoreThroughPicker(before, label, pin = null) {
   const picking = call("backup_restore_pick");
   await until("open picker", async () => inPicker(), 240_000);
   await tapWhen("the backup file", (n) => n.text === FILE, 240_000);
@@ -252,6 +252,16 @@ async function restoreThroughPicker(before, label) {
   await until("app in front", async () => topActivity().includes(PACKAGE));
   const preview = await must("backup_restore_prepare", { passphrase: PASSPHRASE });
   check(`${label}: the preview shows the backup, with nothing current to compare`, preview.backup.transactions === 42 && preview.current.transactions === 0, JSON.stringify(preview));
+  if (pin !== null) {
+    // A valid lock guards the destructive step: the PIN first.
+    const early = await call("backup_restore_commit");
+    check(`${label}: restore is refused before the PIN`, early.code === "pin_required", early.code);
+    check(`${label}: the refusal changed nothing`, (await storage()) !== "ok");
+    const wrongPin = await call("recovery_authenticate", { pin: "000001" });
+    check(`${label}: a wrong PIN is refused`, wrongPin.code === "wrong_pin", wrongPin.code);
+    await must("recovery_authenticate", { pin });
+    // The refusal left the staged restore waiting: the commit below needs no second prepare.
+  }
   await must("backup_restore_commit");
   check(`${label}: storage is usable again`, (await storage()) === "ok");
   check(`${label}: the restored data is identical`, JSON.stringify(await snapshot()) === JSON.stringify(before));
@@ -267,7 +277,8 @@ async function recoveryScenarios(before) {
   check("database missing is reported", (await storage()) === "database_missing");
   check("no database was created behind the user's back", !filesIn(dir).includes("money.db"), filesIn(dir).join(","));
   check("data commands are refused meanwhile", (await call("accounts_list", { includeArchived: false })).code === "unavailable");
-  check("starting fresh without confirmation is refused", (await call("recovery_start_fresh", { confirm: false })).code === "invalid_input");
+  check("starting fresh without the typed word is refused", (await call("recovery_start_fresh", { typed: "" })).code === "invalid_input");
+  check("a lower-case word does not confirm", (await call("recovery_start_fresh", { typed: "hapus" })).code === "invalid_input");
   check("the refusal changed nothing", (await storage()) === "database_missing" && !filesIn(dir).includes("money.db"));
   await restoreThroughPicker(before, "database missing");
 
@@ -291,8 +302,8 @@ async function recoveryScenarios(before) {
   await damageAndStart(() => runAs(`rm -f ${key}`));
   check("a missing key file is reported", (await storage()) === "key_missing");
   check("no key was created behind the user's back", !filesIn(dir).includes("db.key"), keyBlobBefore);
-  check("starting fresh needs the explicit confirmation", (await call("recovery_start_fresh", { confirm: false })).code === "invalid_input");
-  const fresh = await must("recovery_start_fresh", { confirm: true });
+  check("starting fresh needs the typed word", (await call("recovery_start_fresh", { typed: "YA" })).code === "invalid_input");
+  const fresh = await must("recovery_start_fresh", { typed: "HAPUS" });
   check("starting fresh gives a usable, empty database", fresh.storage === "ok" && (await snapshot()).rows.length === 0);
   check("starting fresh created the key and the database", ["db.key", "money.db"].every((f) => filesIn(dir).includes(f)));
 
@@ -302,9 +313,41 @@ async function recoveryScenarios(before) {
   await damageAndStart(() => runAs(`rm -f ${db} ${db}-wal ${db}-shm ${key}`));
   const locked = await must("lock_status");
   check("a lock with no data is reported as lost data, not as a locked app", locked.storage === "database_missing" && locked.configured === true);
-  await restoreThroughPicker(before, "lock without data");
+  check("recovery asks for the PIN before anything destructive", locked.recoveryAuthenticated === false);
+  const noWord = await call("recovery_start_fresh", { typed: "HAPUS" });
+  check("starting fresh is refused without the PIN even with the word", noWord.code === "pin_required", noWord.code);
+  check("the refusal changed nothing", (await storage()) === "database_missing" && !filesIn(dir).includes("money.db"));
+  await restoreThroughPicker(before, "lock without data", PIN);
   const afterLock = await must("lock_status");
   check("the old PIN is gone after the data was replaced", afterLock.configured === false && afterLock.locked === false);
+  check("no markers of the swap remain", !filesIn(dir).some((f) => /\.(old|new)$/.test(f)), filesIn(dir).join(","));
+
+  // 6. A false alarm: the key file comes back before the destructive step. The
+  //    second look finds the data readable and nothing is destroyed.
+  await must("lock_setup", { pin: PIN });
+  runAs(`cp ${key} ${dir}/key.keep`);
+  await damageAndStart(() => runAs(`rm -f ${key}`));
+  check("a missing key is reported", (await storage()) === "key_missing");
+  await must("recovery_authenticate", { pin: PIN });
+  runAs(`cp ${dir}/key.keep ${key}`);
+  const alarm = await call("recovery_start_fresh", { typed: "HAPUS" });
+  check("the second look refuses to destroy readable data", alarm.code === "invalid_input", alarm.code);
+  check("the data and the PIN are intact after the false alarm", (await must("lock_status")).configured === true && filesIn(dir).includes("money.db"));
+  runAs(`rm -f ${dir}/key.keep`);
+
+  // 7. With a valid lock, starting fresh needs the PIN as well as the word, and
+  //    then leaves a working empty database and no old files.
+  const status7 = await must("lock_status");
+  check("the lock is still in place", status7.configured === true);
+  await damageAndStart(() => runAs(`rm -f ${db} ${db}-wal ${db}-shm`));
+  check("data lost behind a valid lock is reported", (await storage()) === "database_missing");
+  const wrongPin = await call("recovery_authenticate", { pin: "000001" });
+  check("a wrong PIN does not open the destructive steps", wrongPin.code === "wrong_pin");
+  await must("recovery_authenticate", { pin: PIN });
+  const fresh7 = await must("recovery_start_fresh", { typed: "HAPUS" });
+  check("starting fresh behind a lock works with PIN and word", fresh7.storage === "ok" && fresh7.configured === false);
+  check("it left a usable empty database", (await snapshot()).rows.length === 0);
+  check("no markers or staged files remain", !filesIn(dir).some((f) => /\.(old|new)$|restore-staged/.test(f)), filesIn(dir).join(","));
 }
 
 try {

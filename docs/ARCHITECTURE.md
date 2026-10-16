@@ -987,3 +987,41 @@ Satu-satunya pemakai adalah kamera di pemilih berkas WebView hasil generator, ya
 
 - **L8:** tidak ada lagi `allow(dead_code)` tingkat modul (dihapus di langkah A); yang tersisa per-item, berdasar alasan.
 - **L9:** migrasi membaca `user_version` **di dalam** `BEGIN IMMEDIATE`. Tes: empat koneksi membuka DB versi 1 bersamaan, 12 putaran, setiap migrasi berjalan **sekali** (12 kategori bawaan, tidak ganda); langkah migrasi yang gagal di-rollback tanpa menaikkan versi dan tanpa transaksi menggantung.
+
+---
+
+## 26. Pengerasan pemulihan: temuan F1–F4 dan F13 (2026-10-16)
+
+Dari `/security-review` dan tinjauan adversarial manual. Tiga aturan baru ada di CLAUDE.md: *galat yang tidak dikenal dianggap sementara*, *hancurkan paling akhir*, *tindakan destruktif butuh PIN (bila `lock.json` valid) dan konfirmasi ketik*. Satu commit per temuan, gerbang validasi di tiap commit.
+
+| Temuan | Perbaikan | Bukti |
+|---|---|---|
+| **F1** `UnrecoverableKeyException` dianggap permanen | `KeyFailures.kt`: hanya **alias hilang, kunci tidak valid permanen (`KeyPermanentlyInvalidatedException`), blob terlalu pendek, atau tag GCM gagal dua kali** yang `key_gone`. `UnrecoverableKeyException`, `UserNotAuthenticatedException`, `KeyStoreException`, `ProviderException`, `IllegalBlockSizeException`, dan semua yang tidak dikenal adalah sementara. `unwrap` mencoba ulang sekali bila tag gagal. Di Rust hanya kode `key_gone` yang menjadi `KeyGone` | 10 tes JVM Kotlin (satu per jenis galat, dijalankan CI) + 2 tes Rust |
+| **F4** `Path::exists()` menelan galat | `fs::metadata`; hanya `NotFound` berarti tidak ada. Galat lain (izin, bukan direktori, I/O) = `Unavailable`, yaitu "Coba lagi": tidak ada layar pemulihan, tidak ada first run, tidak ada berkas berubah | tes bukan-direktori dan izin ditolak |
+| **F2** Pemulihan destruktif tanpa PIN | Dengan `lock.json` valid dan terbaca: **PIN lebih dulu** (`recovery_authenticate`, memakai batas percobaan yang sama, berlaku 5 menit di memori) sebelum "restore menimpa" atau "mulai dari awal" ditawarkan; **kata `HAPUS` diketik** (dicek backend). **Satu pemeriksaan ulang** (`vault::recheck`) tepat sebelum menghancurkan apa pun: bila data ternyata terbuka, atau keadaannya tak bisa dipastikan, perintah dibatalkan tanpa perubahan. `lock.json` rusak tidak dapat diperiksa dan tidak memblokir | tes kewenangan, kedaluwarsa, PIN salah dihitung, recheck untuk tiap keadaan, kata konfirmasi (Rust + UI) |
+| **F3** Kunci Keystore dihapus lebih dulu | Restore-menimpa dan "mulai dari awal" kini **satu jalur** (`commit_recovery`): (1) DB staged sudah ada dan terverifikasi (atau DB kosong baru); (2) kunci DB dibungkus lalu **dibuka lagi** untuk membuktikannya; (3) `money.db` dan `db.key` ditukar **bersama** (lama disimpan sebagai `*.old`, kunci baru lewat `db.key.new`), tiap kegagalan mengembalikan semuanya; (4) berkas baru dibuka dan dibandingkan dengan isi staged, **baru sesudah itu** berkas lama dihapus dan `lock.json` dihapus terakhir. Kunci Keystore di-reset **hanya** bila kunci lama memang tidak bisa dipakai (`key_unusable`: tak ada yang bisa dibaca dengannya, dan hanya ada satu kunci di bawah satu nama). Pada alasan lain kunci yang ada membungkus kunci DB baru tanpa menghapus apa pun | injeksi kegagalan di setiap dari 5 langkah (data lama utuh dan terbaca); crash sebelum tiap langkah dipulihkan menjadi lama **atau** baru, tidak pernah campuran; undo setelah verifikasi gagal, termasuk menghapus berkas baru bila tak ada yang lama |
+| **F13** `.old` dipulihkan karena galat sementara | `recover_interrupted` memakai probe tiga nilai. **Pulihkan yang lama hanya pada jawaban pasti**: `db.key.new` masih ada, DB aktif hilang, atau probe `Corrupt` (bukan database, blob kunci tak terpakai permanen). Probe `Opens` menghapus yang lama (sisa `.old` tak pernah menghidupkan data basi). **Probe `Unknown`** (Keystore sibuk, galat I/O, berkas terkunci, galat pemeriksaan) **tidak memindahkan atau menghapus apa pun** dan pembukaan melapor "coba lagi". Pasangan dinilai sebelum berkas diklasifikasi | tes untuk tiap hasil, `.old` basi + galat sementara, dan pembukaan yang tak diputuskan tidak mengubah satu berkas pun |
+
+### Matriks keadaan setelah perubahan
+
+Berkas yang diperiksa: `money.db` (tidak kosong, atau `money.db.old` ada), `db.key`, `lock.json`. Pertukaran yang terputus dinilai **lebih dulu** (marker `money.db.old`, `db.key.old`, `db.key.new`).
+
+| `money.db` | `db.key` | `lock.json` | Keadaan | Boleh membuat sesuatu? | Tindakan destruktif |
+|---|---|---|---|---|---|
+| tidak | tidak | tidak | First run | **ya** (satu-satunya) | tidak ada |
+| tidak | tidak | ada | `database_missing` | tidak | PIN + (restore atau `HAPUS`) |
+| tidak | ada | tidak | `database_missing` | tidak | restore atau `HAPUS` |
+| tidak | ada | ada | `database_missing` | tidak | PIN + (restore atau `HAPUS`) |
+| ada | tidak | tidak | `key_missing` | tidak | restore atau `HAPUS` |
+| ada | tidak | ada | `key_missing` | tidak | PIN + (restore atau `HAPUS`) |
+| ada | ada | tidak | Siap | tidak | tidak ada |
+| ada | ada | ada | Siap setelah buka kunci | tidak | tidak ada |
+| *berkas tak bisa diperiksa (galat selain NotFound)* | | | **`retry`** | tidak | **tidak ada** |
+| *Keystore sibuk / galat sementara / tak dikenal* | | | **`retry`** | tidak | **tidak ada** |
+| *kunci tak terpakai permanen* | | | `key_unusable` | tidak | PIN (bila lock) + restore atau `HAPUS` (reset kunci Keystore hanya di sini) |
+| *kunci membuka, DB tidak (bukan database)* | | | `database_unreadable` | tidak | PIN (bila lock) + restore atau `HAPUS` |
+| *pertukaran terputus, probe tak bisa memutuskan* | | | `retry` | tidak | **tidak ada** (kedua salinan utuh) |
+
+Sebelum tindakan destruktif mana pun, keadaan diperiksa sekali lagi. Hasil `Readable` atau `Transient` membatalkan tanpa perubahan; hanya `StillUnreadable` (termasuk "tidak ada apa-apa lagi") yang dilanjutkan.
+
+**Batas yang diketahui:** `UnrecoverableKeyException` yang sebenarnya permanen (entri Keystore rusak) kini selalu tampil sebagai "Coba lagi" dan pengguna harus menghapus data aplikasi lewat pengaturan Android. Itu pilihan sadar: lebih baik buntu daripada menawarkan "mulai dari awal" karena galat yang mungkin sementara.

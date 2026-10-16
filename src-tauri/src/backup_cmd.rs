@@ -351,6 +351,11 @@ pub async fn backup_restore_commit(
 ) -> Result<CountsDto, AppError> {
     require_unlocked_or_recovering(&state)?;
     let recovering = state.recovering();
+    if recovering {
+        // Before the staged restore is touched: a refusal must leave it waiting,
+        // so that entering the PIN and trying again is all that is needed.
+        crate::recovery::require_recovery_authority(&state, Instant::now())?;
+    }
     let staged = state
         .restore_session(|s| s.staged.take())
         .ok_or_else(|| AppError::invalid("no verified backup is waiting"))?;
