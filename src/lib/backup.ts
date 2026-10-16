@@ -6,16 +6,24 @@ import type { ErrorCode } from "./api";
 export const PASSPHRASE_MIN = 12;
 export const PASSPHRASE_MAX = 128;
 
-/** Why `passphrase` cannot protect a new backup, or null when it can. */
-export function passphraseProblem(passphrase: string): string | null {
-  // Judged on the NFKC form, which is what the backup hashes.
-  const chars = [...passphrase.normalize("NFKC")];
+function judge(text: string): string | null {
+  const chars = [...text];
   if (chars.length < PASSPHRASE_MIN) {
     return `Frasa sandi minimal ${PASSPHRASE_MIN} karakter (sekarang ${chars.length}).`;
   }
   if (chars.length > PASSPHRASE_MAX) return `Frasa sandi maksimal ${PASSPHRASE_MAX} karakter.`;
   if (chars.every((c) => c === chars[0])) return "Frasa sandi terlalu mudah ditebak.";
   return null;
+}
+
+/**
+ * Why `passphrase` cannot protect a new backup, or null when it can. Judged on
+ * the text as typed **and** on its NFKC form (what the backup hashes); the
+ * stricter result wins, exactly like the backend. NFKC can expand one character
+ * into many (U+FDFD gives 18), so the normalised length alone is not enough.
+ */
+export function passphraseProblem(passphrase: string): string | null {
+  return judge(passphrase) ?? judge(passphrase.normalize("NFKC"));
 }
 
 /** `money-tracker-YYYYMMDD.mtbak` from an ISO date (`YYYY-MM-DD`). */

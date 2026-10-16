@@ -135,10 +135,8 @@ fn normalize(passphrase: &str) -> Zeroizing<String> {
     Zeroizing::new(passphrase.nfkc().collect())
 }
 
-/// Checks a passphrase chosen for a new backup. Never echoes it. Length and
-/// repetition are judged on the normalised text, which is what gets hashed.
-pub fn validate_passphrase(passphrase: &str) -> Result<(), PassphraseProblem> {
-    let passphrase = normalize(passphrase);
+/// Judges one form of the passphrase: length (in characters) and repetition.
+fn judge(passphrase: &str) -> Result<(), PassphraseProblem> {
     let chars = passphrase.chars().count();
     if chars < PASSPHRASE_MIN_CHARS {
         return Err(PassphraseProblem::TooShort);
@@ -153,6 +151,29 @@ pub fn validate_passphrase(passphrase: &str) -> Result<(), PassphraseProblem> {
         return Err(PassphraseProblem::Repetitive);
     }
     Ok(())
+}
+
+/// Checks a passphrase chosen for a new backup. Never echoes it.
+///
+/// The rules are applied to **both** the text as typed and its NFKC form, and
+/// the stricter verdict wins. NFKC can *expand* a single compatibility
+/// character into many (U+FDFD becomes 18 characters, one ligature becomes
+/// three letters), so judging only the normalised text would let a one-to-four
+/// character passphrase through; and it can *shrink* decomposed text, so
+/// judging only the raw text would overcount.
+pub fn validate_passphrase(passphrase: &str) -> Result<(), PassphraseProblem> {
+    let normalized = normalize(passphrase);
+    let raw = judge(passphrase);
+    let folded = judge(&normalized);
+    // Prefer the most informative problem when both forms fail.
+    match (raw, folded) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(a), Ok(())) | (Ok(()), Err(a)) => Err(a),
+        (Err(PassphraseProblem::TooShort), Err(_)) | (Err(_), Err(PassphraseProblem::TooShort)) => {
+            Err(PassphraseProblem::TooShort)
+        }
+        (Err(a), Err(_)) => Err(a),
+    }
 }
 
 /// Argon2id cost recorded in the header.
@@ -760,6 +781,73 @@ mod tests {
         assert!(unseal(&file, wide).is_ok());
         // ...while a genuinely different passphrase still fails.
         assert!(unseal(&file, "financial secret phrasf").is_err());
+    }
+
+    #[test]
+    fn a_compatibility_character_cannot_stand_in_for_a_long_passphrase() {
+        // U+FDFA expands to 18 characters under NFKC: one typed character must not pass.
+        assert_eq!(normalize("\u{fdfa}").chars().count(), 18);
+        assert_eq!(
+            validate_passphrase("\u{fdfa}"),
+            Err(PassphraseProblem::TooShort)
+        );
+        // U+FDFD does not expand (it stays one character): still far too short.
+        assert_eq!(normalize("\u{fdfd}").chars().count(), 1);
+        assert_eq!(
+            validate_passphrase("\u{fdfd}"),
+            Err(PassphraseProblem::TooShort)
+        );
+        // The "ffi" ligature four times is four typed characters (twelve letters after NFKC).
+        let ligatures = "\u{fb03}".repeat(4);
+        assert_eq!(normalize(&ligatures).as_str(), "ffiffiffiffi");
+        assert_eq!(
+            validate_passphrase(&ligatures),
+            Err(PassphraseProblem::TooShort)
+        );
+        // U+337F (square corporation) expands to four characters: three typed make twelve.
+        let square = "\u{337f}".repeat(3);
+        assert_eq!(normalize(&square).chars().count(), 12);
+        assert_eq!(
+            validate_passphrase(&square),
+            Err(PassphraseProblem::TooShort)
+        );
+        // Typed twelve times it is long enough but one character repeated.
+        assert_eq!(
+            validate_passphrase(&"\u{337f}".repeat(12)),
+            Err(PassphraseProblem::Repetitive)
+        );
+        assert_eq!(
+            validate_passphrase(&"\u{fdfa}".repeat(12)),
+            Err(PassphraseProblem::Repetitive)
+        );
+        assert_eq!(
+            validate_passphrase(&"\u{fdfd}".repeat(12)),
+            Err(PassphraseProblem::Repetitive)
+        );
+    }
+
+    #[test]
+    fn the_stricter_of_the_two_forms_decides() {
+        // One repeated letter after folding is refused even though it is not one
+        // repeated *character* as typed (mixed ASCII and full-width A).
+        assert_eq!(
+            validate_passphrase(&"\u{ff21}".repeat(12)),
+            Err(PassphraseProblem::Repetitive)
+        );
+        assert_eq!(
+            validate_passphrase(&format!("{}{}", "A".repeat(6), "\u{ff21}".repeat(6))),
+            Err(PassphraseProblem::Repetitive)
+        );
+        // Fine as typed (100 characters) but 6 x U+FDFA expand it beyond the maximum.
+        let long = format!("{}{}", "abcdefghij".repeat(9), "\u{fdfa}".repeat(6))
+            .chars()
+            .take(94)
+            .collect::<String>()
+            + &"\u{fdfa}".repeat(6);
+        assert_eq!(long.chars().count(), 100);
+        assert_eq!(validate_passphrase(&long), Err(PassphraseProblem::TooLong));
+        // An ordinary passphrase is unaffected.
+        assert_eq!(validate_passphrase("kopi susu gula aren enak"), Ok(()));
     }
 
     #[test]

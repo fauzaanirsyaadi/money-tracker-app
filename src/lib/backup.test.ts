@@ -16,6 +16,15 @@ test("a twelve character passphrase is accepted, counting characters not bytes",
   assert.equal(passphraseProblem("kopi susu gula aren enak"), null);
 });
 
+test("a compatibility character cannot stand in for a long passphrase", () => {
+  assert.match(passphraseProblem("\ufdfa")!, /minimal 12/); // U+FDFA is 18 characters once normalised
+  assert.match(passphraseProblem("\ufdfd")!, /minimal 12/); // U+FDFD stays one character
+  assert.match(passphraseProblem("\ufb03".repeat(4))!, /minimal 12/); // ffi ligature x4
+  assert.match(passphraseProblem("\u337f".repeat(3))!, /minimal 12/); // 12 once normalised
+  assert.match(passphraseProblem("\u337f".repeat(12))!, /terlalu mudah/);
+  assert.match(passphraseProblem("\uff21".repeat(12))!, /terlalu mudah/); // full-width A
+});
+
 test("the policy counts the normalised form, like the backup does", () => {
   // Twelve decomposed letters (24 code points) are twelve characters.
   assert.equal(passphraseProblem("e\u0301".repeat(6) + "a\u0301".repeat(6)), null);
