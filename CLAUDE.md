@@ -11,3 +11,9 @@ Personal finance app. Android first, local-only mode. Stack: Tauri 2, Rust, Svel
 - No new dependency without stating why, its license and its maintenance status.
 - Never log financial data.
 - Minimal Tauri capabilities and a strict CSP.
+- Unknown or unclassified errors are treated as transient. Only explicit permanent
+  signals may lead to the recovery screen.
+- Destroy last: never delete or reset keys or data before the replacement is created and
+  verified.
+- Destructive actions require the PIN when lock.json is valid and readable, plus a typed
+  confirmation.
