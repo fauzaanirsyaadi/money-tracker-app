@@ -5,9 +5,18 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use mt_storage::{Db, LogicalSummary};
+use mt_storage::{Db, DbKey, LogicalSummary};
 
-use crate::{applock::LockService, error::AppError};
+use crate::{applock::LockService, error::AppError, vault::RecoveryReason};
+
+/// Why the data cannot be used right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageProblem {
+    /// Data is lost or unreadable: restore from a backup, or start fresh.
+    Recovery(RecoveryReason),
+    /// A failure that may pass; only "try again" is offered.
+    Retry,
+}
 
 /// A restore the user has started but not yet confirmed.
 #[derive(Default)]
@@ -16,6 +25,9 @@ pub struct RestoreSession {
     pub picked: Option<PathBuf>,
     /// A fully verified database built from it, waiting for confirmation.
     pub staged: Option<StagedRestore>,
+    /// Key the staged database was built with, when it will *replace*
+    /// unreadable data (recovery) rather than reuse the live key.
+    pub fresh_key: Option<DbKey>,
 }
 
 pub struct StagedRestore {
@@ -31,6 +43,7 @@ pub struct AppState {
     db: Mutex<Option<Db>>,
     lock: LockService,
     restore: Mutex<RestoreSession>,
+    problem: Mutex<Option<StorageProblem>>,
 }
 
 impl AppState {
@@ -39,7 +52,21 @@ impl AppState {
             db: Mutex::new(db),
             lock,
             restore: Mutex::new(RestoreSession::default()),
+            problem: Mutex::new(None),
         }
+    }
+
+    pub fn problem(&self) -> Option<StorageProblem> {
+        *self.problem.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn set_problem(&self, problem: Option<StorageProblem>) {
+        *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = problem;
+    }
+
+    /// Whether the data is lost or unreadable and recovery is on offer.
+    pub fn recovering(&self) -> bool {
+        matches!(self.problem(), Some(StorageProblem::Recovery(_)))
     }
 
     pub fn applock(&self) -> &LockService {

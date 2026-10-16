@@ -133,7 +133,7 @@ impl BudgetStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BudgetProgress {
     pub limit: Money,
     pub spent: Money,
@@ -172,7 +172,7 @@ pub fn progress(limit: Money, spent: Money) -> Result<BudgetProgress, MoneyError
 }
 
 /// A validated budget limit for one category and month.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BudgetDraft {
     category_id: i64,
     month: YearMonth,
@@ -203,6 +203,9 @@ impl BudgetDraft {
         self.limit
     }
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+crate::redacted_debug!(BudgetProgress, BudgetDraft);
 
 #[cfg(test)]
 mod tests {

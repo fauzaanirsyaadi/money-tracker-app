@@ -45,17 +45,26 @@ impl Currency {
         Self { code, exponent }
     }
 
-    /// Builds a currency from an arbitrary code and exponent.
+    /// Builds a currency from a code and its exponent.
+    ///
+    /// A code in the built-in table has exactly one correct exponent, and any
+    /// other is refused: accepting `IDR` with 2 decimals would read `1000` as
+    /// `10.00` and silently scale every amount by 100. A code that is not in
+    /// the table is accepted with the exponent the caller states (0 to 4).
     pub fn new(code: &str, exponent: u8) -> Result<Self, MoneyError> {
         let bytes = code.as_bytes();
         if bytes.len() != 3 || !bytes.iter().all(u8::is_ascii_uppercase) || exponent > MAX_EXPONENT
         {
             return Err(MoneyError::InvalidCurrency);
         }
-        Ok(Self {
+        let candidate = Self {
             code: [bytes[0], bytes[1], bytes[2]],
             exponent,
-        })
+        };
+        match Self::ALL.iter().find(|known| known.code == candidate.code) {
+            Some(known) if known.exponent != exponent => Err(MoneyError::InvalidCurrency),
+            _ => Ok(candidate),
+        }
     }
 
     /// Looks a currency up in the built-in table by ISO code.
@@ -100,12 +109,43 @@ mod tests {
     }
 
     #[test]
+    fn a_known_code_only_accepts_its_own_exponent() {
+        for known in Currency::ALL {
+            assert_eq!(Currency::new(known.code(), known.exponent()), Ok(known));
+            for wrong in (0..=MAX_EXPONENT).filter(|e| *e != known.exponent()) {
+                assert_eq!(
+                    Currency::new(known.code(), wrong),
+                    Err(MoneyError::InvalidCurrency),
+                    "{} with {wrong} decimals",
+                    known.code()
+                );
+            }
+        }
+        // The cases that matter most for this app and its reviewers.
+        assert_eq!(Currency::new("IDR", 0), Ok(Currency::IDR));
+        assert_eq!(Currency::new("IDR", 2), Err(MoneyError::InvalidCurrency));
+        assert_eq!(Currency::new("USD", 2), Ok(Currency::USD));
+        assert_eq!(Currency::new("USD", 0), Err(MoneyError::InvalidCurrency));
+        assert_eq!(Currency::new("KWD", 3), Ok(Currency::KWD));
+        assert_eq!(Currency::new("KWD", 2), Err(MoneyError::InvalidCurrency));
+    }
+
+    #[test]
+    fn an_unlisted_code_takes_the_stated_exponent() {
+        // Bahraini dinar uses three decimals and is not in the table.
+        let bhd = Currency::new("BHD", 3).unwrap();
+        assert_eq!((bhd.code(), bhd.exponent(), bhd.scale()), ("BHD", 3, 1000));
+        assert_eq!(Currency::from_code("BHD"), Err(MoneyError::InvalidCurrency));
+    }
+
+    #[test]
     fn rejects_unknown_and_malformed() {
         assert_eq!(Currency::from_code("XXX"), Err(MoneyError::InvalidCurrency));
         assert_eq!(Currency::new("idr", 0), Err(MoneyError::InvalidCurrency));
         assert_eq!(Currency::new("ID", 0), Err(MoneyError::InvalidCurrency));
         assert_eq!(Currency::new("IDRR", 0), Err(MoneyError::InvalidCurrency));
         assert_eq!(Currency::new("IDR", 5), Err(MoneyError::InvalidCurrency));
-        assert_eq!(Currency::new("IDR", 4).map(|c| c.scale()), Ok(10_000));
+        assert_eq!(Currency::new("XYZ", 4).map(|c| c.scale()), Ok(10_000));
+        assert_eq!(Currency::new("XYZ", 5), Err(MoneyError::InvalidCurrency));
     }
 }

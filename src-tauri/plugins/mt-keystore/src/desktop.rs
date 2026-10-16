@@ -24,6 +24,10 @@ impl<R: Runtime> MtKeystore<R> {
         Err(Error::Unsupported)
     }
 
+    pub fn reset(&self) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+
     pub fn security_level(&self) -> Result<SecurityLevel> {
         Err(Error::Unsupported)
     }

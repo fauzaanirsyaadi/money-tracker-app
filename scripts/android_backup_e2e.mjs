@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// End-to-end backup and restore on a device or emulator, through the real
-// system file pickers:
+// End-to-end backup, restore and recovery on a device or emulator, through the
+// real system file pickers:
 //
 //   seed data -> set PIN -> export (picker) -> check the file ->
-//   uninstall -> reinstall -> restore (picker) -> compare everything.
+//   uninstall -> reinstall -> restore (picker) -> compare everything ->
+//   damage the installation (database gone, key damaged, key gone, lock only)
+//   and check that nothing is created silently and each way out works.
 //
 //   node scripts/android_backup_e2e.mjs [--apk PATH] [--serial ID]
 //
@@ -218,6 +220,93 @@ async function seed() {
   });
 }
 
+// --- Recovery: damage the installation, check the app's response -------------
+
+/** Runs a shell command inside the app's sandbox (debug builds only). */
+const runAs = (command) => adb("shell", "run-as", PACKAGE, "sh", "-c", `"${command}"`);
+
+function dataDir() {
+  const found = runAs("find . -name money.db -not -path './cache/*' | head -1");
+  return found ? path.posix.dirname(found) : "files";
+}
+
+const filesIn = (dir) => runAs(`ls ${dir}`).split("\n").filter(Boolean).sort();
+
+async function storage() {
+  return (await must("lock_status")).storage;
+}
+
+/** Stops the app, applies `damage`, starts it again. */
+async function damageAndStart(damage) {
+  adb("shell", "am", "force-stop", PACKAGE);
+  damage();
+  await startApp();
+}
+
+async function restoreThroughPicker(before, label) {
+  const picking = call("backup_restore_pick");
+  await until("open picker", async () => inPicker(), 240_000);
+  await tapWhen("the backup file", (n) => n.text === FILE, 240_000);
+  const picked = await picking;
+  check(`${label}: the backup file was chosen`, picked.ok === true);
+  await until("app in front", async () => topActivity().includes(PACKAGE));
+  const preview = await must("backup_restore_prepare", { passphrase: PASSPHRASE });
+  check(`${label}: the preview shows the backup, with nothing current to compare`, preview.backup.transactions === 42 && preview.current.transactions === 0, JSON.stringify(preview));
+  await must("backup_restore_commit");
+  check(`${label}: storage is usable again`, (await storage()) === "ok");
+  check(`${label}: the restored data is identical`, JSON.stringify(await snapshot()) === JSON.stringify(before));
+}
+
+async function recoveryScenarios(before) {
+  const dir = dataDir();
+  const db = `${dir}/money.db`;
+  const key = `${dir}/db.key`;
+
+  // 1. The database file is gone but the key is not: never recreate it silently.
+  await damageAndStart(() => runAs(`rm -f ${db} ${db}-wal ${db}-shm`));
+  check("database missing is reported", (await storage()) === "database_missing");
+  check("no database was created behind the user's back", !filesIn(dir).includes("money.db"), filesIn(dir).join(","));
+  check("data commands are refused meanwhile", (await call("accounts_list", { includeArchived: false })).code === "unavailable");
+  check("starting fresh without confirmation is refused", (await call("recovery_start_fresh", { confirm: false })).code === "invalid_input");
+  check("the refusal changed nothing", (await storage()) === "database_missing" && !filesIn(dir).includes("money.db"));
+  await restoreThroughPicker(before, "database missing");
+
+  // 2. A zero-byte database counts as missing too.
+  await damageAndStart(() => runAs(`: > ${db}; rm -f ${db}-wal ${db}-shm`));
+  check("an empty database file is reported as missing", (await storage()) === "database_missing");
+  check("the empty file was left alone", runAs(`wc -c < ${db}`).trim() === "0");
+
+  // 3. The key blob is damaged: the data cannot be opened and nothing is replaced.
+  await restoreThroughPicker(before, "empty file").catch(() => {
+    throw new Error("restore after an empty database failed");
+  });
+  const dbSizeBefore = runAs(`wc -c < ${db}`).trim();
+  await damageAndStart(() => runAs(`head -c 60 /dev/urandom > ${key}`));
+  check("a damaged key is reported as unusable", (await storage()) === "key_unusable");
+  check("the database was not touched", runAs(`wc -c < ${db}`).trim() === dbSizeBefore);
+  await restoreThroughPicker(before, "unusable key");
+
+  // 4. The key file is gone while the database exists.
+  const keyBlobBefore = runAs(`wc -c < ${key}`).trim();
+  await damageAndStart(() => runAs(`rm -f ${key}`));
+  check("a missing key file is reported", (await storage()) === "key_missing");
+  check("no key was created behind the user's back", !filesIn(dir).includes("db.key"), keyBlobBefore);
+  check("starting fresh needs the explicit confirmation", (await call("recovery_start_fresh", { confirm: false })).code === "invalid_input");
+  const fresh = await must("recovery_start_fresh", { confirm: true });
+  check("starting fresh gives a usable, empty database", fresh.storage === "ok" && (await snapshot()).rows.length === 0);
+  check("starting fresh created the key and the database", ["db.key", "money.db"].every((f) => filesIn(dir).includes(f)));
+
+  // 5. A lock with no data behind it: the PIN does not make the data reappear,
+  //    and recovery replaces the lock together with the data.
+  await must("lock_setup", { pin: PIN });
+  await damageAndStart(() => runAs(`rm -f ${db} ${db}-wal ${db}-shm ${key}`));
+  const locked = await must("lock_status");
+  check("a lock with no data is reported as lost data, not as a locked app", locked.storage === "database_missing" && locked.configured === true);
+  await restoreThroughPicker(before, "lock without data");
+  const afterLock = await must("lock_status");
+  check("the old PIN is gone after the data was replaced", afterLock.configured === false && afterLock.locked === false);
+}
+
 try {
   try {
     adb("uninstall", PACKAGE);
@@ -325,6 +414,8 @@ try {
   await startApp();
   const restarted = await snapshot();
   check("data is still there after a restart", JSON.stringify(restarted) === JSON.stringify(before));
+
+  await recoveryScenarios(before);
 
   console.log(`\nBACKUP E2E OK (${checks} checks)`);
   process.exitCode = 0;

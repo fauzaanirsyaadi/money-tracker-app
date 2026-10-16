@@ -9,6 +9,8 @@ mod categories;
 mod db;
 mod error;
 mod recurring;
+#[cfg(test)]
+mod redaction_tests;
 mod reports;
 mod transactions;
 

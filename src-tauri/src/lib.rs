@@ -8,7 +8,10 @@ mod budgets;
 mod error;
 mod lock;
 mod platform;
+mod recovery;
 mod recurring;
+#[cfg(test)]
+mod redaction_tests;
 mod reports;
 mod state;
 mod transactions;
@@ -30,17 +33,15 @@ pub fn run() {
         .plugin(tauri_plugin_mt_platform::init())
         .setup(|app| {
             // The database is opened here only when no app lock is set. With a
-            // lock it stays closed until the PIN or biometrics unlock it.
+            // lock it stays closed until the PIN or biometrics unlock it. Lost
+            // or unreadable data is reported, never silently replaced.
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let lock = LockService::load(&dir, Instant::now());
-            let db = if lock.is_locked() {
-                None
-            } else {
-                vault::open_database(app.handle()).ok()
-            };
             backup_cmd::clean_leftovers(app.handle());
-            app.manage(AppState::new(db, lock));
+            app.manage(AppState::new(None, lock));
+            let state = app.state::<AppState>();
+            recovery::initialize(app.handle(), &state);
             Ok(())
         });
 
@@ -101,6 +102,8 @@ pub fn run() {
         lock::lock_biometric_set,
         lock::lock_auto_set,
         lock::lock_now,
+        recovery::recovery_retry,
+        recovery::recovery_start_fresh,
         backup_cmd::backup_export,
         backup_cmd::backup_restore_pick,
         backup_cmd::backup_restore_prepare,

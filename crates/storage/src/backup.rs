@@ -47,7 +47,7 @@ pub const TABLE_ORDER: &[&str] = &[
 ];
 
 /// What a backup contains, for the confirmation screen and verification.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct LogicalSummary {
     pub schema_version: u32,
     /// Row count per table.
@@ -371,13 +371,8 @@ fn recorded_balances(footer: &Value) -> Result<Vec<(i64, i64)>, StorageError> {
         .ok_or(StorageError::BackupInvalid)
 }
 
-/// Reads and discards a reader; used by tests that only need the byte count.
-#[cfg(test)]
-fn drain(mut reader: impl Read) -> usize {
-    let mut sink = Vec::new();
-    reader.read_to_end(&mut sink).unwrap();
-    sink.len()
-}
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(LogicalSummary);
 
 #[cfg(test)]
 mod tests {
@@ -679,6 +674,5 @@ mod tests {
             .query_row("SELECT count(*) FROM categories", [], |r| r.get(0))
             .unwrap();
         assert!(count > 1);
-        let _ = drain(&b""[..]);
     }
 }

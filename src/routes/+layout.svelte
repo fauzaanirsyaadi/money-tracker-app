@@ -8,6 +8,7 @@
   import Icon from "$lib/components/Icon.svelte";
   import LockScreen from "$lib/components/LockScreen.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
+  import RecoveryScreen from "$lib/components/RecoveryScreen.svelte";
   import { isoDate } from "$lib/dates";
   import { isDarkTheme, loadTheme, nextTheme, saveTheme, type ThemePref } from "$lib/prefs";
   import {
@@ -112,11 +113,16 @@
     };
   });
 
-  const unlocked = $derived(lockState.status !== null && !lockState.status.locked);
+  // The data must be usable and the lock open before any screen shows it.
+  const unlocked = $derived(
+    lockState.status !== null && lockState.status.storage === "ok" && !lockState.status.locked,
+  );
 </script>
 
 {#if lockState.status === null}
   <div class="cover" aria-hidden="true"></div>
+{:else if lockState.status.storage !== "ok"}
+  <RecoveryScreen />
 {:else if lockState.status.locked}
   <LockScreen />
 {/if}

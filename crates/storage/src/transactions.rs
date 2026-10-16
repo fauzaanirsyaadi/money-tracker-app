@@ -52,7 +52,7 @@ impl RecordKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TransactionRecord {
     pub id: i64,
     pub account_id: i64,
@@ -69,7 +69,7 @@ pub struct TransactionRecord {
 }
 
 /// Which transactions to list; every field narrows the result.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct TransactionFilter {
     pub account_id: Option<i64>,
     /// A parent category also matches its sub-categories.
@@ -467,6 +467,9 @@ impl Raw {
         })
     }
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(TransactionRecord, TransactionFilter);
 
 #[cfg(test)]
 mod tests {

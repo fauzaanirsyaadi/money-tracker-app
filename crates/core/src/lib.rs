@@ -2,6 +2,22 @@
 //!
 //! This crate performs no I/O and depends on neither storage nor UI.
 
+/// Implements `Debug` for types that hold amounts, names or notes, printing the
+/// type name only. Use it instead of `#[derive(Debug)]` on such types; the
+/// repository guard `scripts/check_debug_redaction.py` enforces that.
+#[macro_export]
+macro_rules! redacted_debug {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl ::core::fmt::Debug for $ty {
+                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                    f.write_str(concat!(stringify!($ty), " { .. }"))
+                }
+            }
+        )+
+    };
+}
+
 mod account;
 mod applock;
 mod budget;

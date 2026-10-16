@@ -90,7 +90,7 @@ pub fn normalize_account_name(raw: &str) -> Result<String, AccountError> {
 }
 
 /// A validated new account. Its currency is the opening balance's currency.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccountDraft {
     name: String,
     kind: AccountKind,
@@ -122,6 +122,9 @@ impl AccountDraft {
         self.opening_balance
     }
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+crate::redacted_debug!(AccountDraft);
 
 #[cfg(test)]
 mod tests {

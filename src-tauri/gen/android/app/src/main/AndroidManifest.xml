@@ -31,14 +31,13 @@
             </intent-filter>
         </activity>
 
-        <provider
-          android:name="androidx.core.content.FileProvider"
-          android:authorities="${applicationId}.fileprovider"
-          android:exported="false"
-          android:grantUriPermissions="true">
-          <meta-data
-            android:name="android.support.FILE_PROVIDER_PATHS"
-            android:resource="@xml/file_paths" />
-        </provider>
+        <!--
+          No FileProvider on purpose (review item L5). The only user is the
+          generated WebView file chooser's camera capture, which this app never
+          triggers (no file inputs; backups use the system file pickers through
+          the mt-platform plugin). Its file_paths.xml shared the whole external
+          storage and cache. CI fails if a FileProvider reappears, for instance
+          after `tauri android init` regenerates this file.
+        -->
     </application>
 </manifest>

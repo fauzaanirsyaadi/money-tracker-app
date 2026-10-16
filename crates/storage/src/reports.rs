@@ -16,7 +16,7 @@ use crate::{accounts::Account, db::Db, error::StorageError};
 /// Upper bound for a monthly trend, so one call cannot scan a lifetime.
 pub const MAX_TREND_MONTHS: usize = 120;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CategorySpending {
     pub category_id: i64,
     pub name: String,
@@ -29,7 +29,7 @@ pub struct CategorySpending {
     pub children: Vec<ChildSpending>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ChildSpending {
     pub category_id: i64,
     pub name: String,
@@ -37,7 +37,7 @@ pub struct ChildSpending {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SpendingReport {
     pub from: Date,
     pub to: Date,
@@ -45,7 +45,7 @@ pub struct SpendingReport {
     pub categories: Vec<CategorySpending>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MonthSummary {
     pub month: YearMonth,
     pub income: Money,
@@ -57,7 +57,7 @@ pub struct MonthSummary {
     pub net_worth: Money,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NetWorth {
     pub total: Money,
     /// Active accounts first, in display order.
@@ -273,6 +273,15 @@ impl Db {
         Ok(NetWorth { total, accounts })
     }
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(
+    CategorySpending,
+    ChildSpending,
+    SpendingReport,
+    MonthSummary,
+    NetWorth
+);
 
 #[cfg(test)]
 mod tests {

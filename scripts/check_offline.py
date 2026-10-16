@@ -77,6 +77,9 @@ def check_manifest(path: Path) -> list[str]:
     if app is None:
         fail(problems, f"{path}: no <application> element")
         return problems
+    for provider in app.iter("provider"):
+        if provider.get(f"{ANDROID}name", "").endswith("FileProvider"):
+            fail(problems, f"{path}: a FileProvider shares files with other apps and is not used here")
     if app.get(f"{ANDROID}allowBackup") != "false":
         fail(problems, f"{path}: android:allowBackup must be \"false\"")
     if app.get(f"{ANDROID}usesCleartextTraffic") == "true":
@@ -140,6 +143,8 @@ def check_apk(apk: Path, aapt2: str = "aapt2", run=_aapt2, libs=_native_libs) ->
         fail(problems, f"{apk}: release build must not be debuggable")
     if not re.search(r":dataExtractionRules\(", tree):
         fail(problems, f"{apk}: android:dataExtractionRules is missing")
+    if re.search(r'FileProvider"', tree):
+        fail(problems, f"{apk}: a FileProvider shares files with other apps and is not used here")
 
     # wry only emits this JNI call when devtools are compiled in (debug build or
     # the `devtools` feature). A release APK must not expose the inspector.

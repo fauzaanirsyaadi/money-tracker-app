@@ -13,7 +13,7 @@ use tauri::State;
 
 use crate::{error::AppError, state::AppState};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountDto {
     pub id: i64,
@@ -26,7 +26,7 @@ pub struct AccountDto {
     pub archived: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountInput {
     pub name: String,
@@ -143,6 +143,9 @@ pub async fn account_archive(
 ) -> Result<AccountDto, AppError> {
     state.with_db(|db| archive(db, id, archived))
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(AccountDto, AccountInput);
 
 #[cfg(test)]
 mod tests {

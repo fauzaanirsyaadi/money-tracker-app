@@ -5,7 +5,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{db::Db, error::StorageError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Category {
     pub id: i64,
     pub name: String,
@@ -76,6 +76,9 @@ impl Db {
         Ok(id)
     }
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(Category);
 
 #[cfg(test)]
 mod tests {

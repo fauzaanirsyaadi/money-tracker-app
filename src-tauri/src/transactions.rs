@@ -20,7 +20,7 @@ use crate::{accounts::parse_minor, error::AppError, state::AppState};
 
 // ---------------------------------------------------------------- categories
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategoryDto {
     pub id: i64,
@@ -42,7 +42,7 @@ impl From<&Category> for CategoryDto {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategoryInput {
     pub name: String,
@@ -78,7 +78,7 @@ pub(crate) fn create_category(db: &mut Db, input: &CategoryInput) -> Result<Cate
 
 // -------------------------------------------------------------- transactions
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionDto {
     pub id: i64,
@@ -118,7 +118,7 @@ impl From<&TransactionRecord> for TransactionDto {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionInput {
     pub account_id: i64,
@@ -131,7 +131,7 @@ pub struct TransactionInput {
     pub occurred_on: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferInput {
     pub from_account_id: i64,
@@ -141,7 +141,7 @@ pub struct TransferInput {
     pub occurred_on: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FilterInput {
     pub account_id: Option<i64>,
@@ -349,6 +349,16 @@ pub async fn transfer_create(
 ) -> Result<TransactionDto, AppError> {
     state.with_db(|db| create_transfer(db, &input, now_unix()))
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(
+    CategoryDto,
+    CategoryInput,
+    TransactionDto,
+    TransactionInput,
+    TransferInput,
+    FilterInput
+);
 
 #[cfg(test)]
 mod tests {

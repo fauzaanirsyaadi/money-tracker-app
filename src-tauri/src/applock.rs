@@ -26,7 +26,7 @@ use mt_core::{AutoLock, PinProblem, is_plausible_pin, lockout_delay, validate_ne
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-const LOCK_FILE: &str = "lock.json";
+pub(crate) const LOCK_FILE: &str = "lock.json";
 const FORMAT: u32 = 1;
 
 /// Longest the system file picker may hold the app in the background before
@@ -62,7 +62,7 @@ pub struct LockSnapshot {
     pub retry_after: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Record {
     v: u32,
     /// PHC string: `$argon2id$v=19$m=...,t=...,p=...$salt$hash`.
@@ -104,6 +104,9 @@ fn hasher() -> Argon2<'static> {
     let params = Params::new(19 * 1024, 2, 1, Some(32)).expect("valid Argon2 parameters");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(Record);
 
 #[cfg(test)]
 fn hasher() -> Argon2<'static> {
@@ -309,6 +312,23 @@ impl LockService {
         inner.record = None;
         inner.locked = false;
         inner.lockout_until = None;
+        Ok(())
+    }
+
+    /// Forgets the lock entirely, deleting `lock.json`. For recovery, after the
+    /// user confirmed that the old data (and its PIN) are being replaced.
+    pub fn erase(&self) -> io::Result<()> {
+        let mut inner = self.state();
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        inner.record = None;
+        inner.broken = false;
+        inner.locked = false;
+        inner.lockout_until = None;
+        inner.suspended = None;
         Ok(())
     }
 
@@ -626,6 +646,21 @@ mod tests {
             service.verify_pin(&pin("493017"), now),
             Err(LockError::WrongPin)
         );
+    }
+
+    #[test]
+    fn erase_forgets_the_lock_even_when_the_file_is_damaged() {
+        let dir = Dir::new();
+        fs::write(dir.0.join(LOCK_FILE), b"{broken").unwrap();
+        let (service, now) = fresh(&dir);
+        assert!(service.snapshot(now).broken);
+        service.erase().unwrap();
+        let snap = service.snapshot(now);
+        assert!(!snap.configured && !snap.locked && !snap.broken);
+        assert!(!dir.0.join(LOCK_FILE).exists());
+        // Erasing again is harmless, and a PIN can be set afresh.
+        service.erase().unwrap();
+        service.set_pin(&pin("493017")).unwrap();
     }
 
     #[test]

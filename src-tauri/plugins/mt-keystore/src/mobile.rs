@@ -20,6 +20,9 @@ struct DataRequest {
 }
 
 #[derive(Deserialize)]
+struct Empty {}
+
+#[derive(Deserialize)]
 struct DataResponse {
     data: String,
 }
@@ -41,6 +44,13 @@ impl<R: Runtime> MtKeystore<R> {
     /// Reverses [`MtKeystore::wrap`]. Fails if the blob was altered or the key is gone.
     pub fn unwrap(&self, blob: &[u8]) -> Result<Vec<u8>> {
         self.call("unwrap", blob)
+    }
+
+    /// Deletes the wrapping key. Only for a restore that replaces data the old
+    /// key can no longer open, after the user confirmed.
+    pub fn reset(&self) -> Result<()> {
+        let _: Empty = self.0.run_mobile_plugin("reset", ())?;
+        Ok(())
     }
 
     pub fn security_level(&self) -> Result<SecurityLevel> {

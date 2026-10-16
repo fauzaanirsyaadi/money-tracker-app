@@ -149,7 +149,7 @@ impl Db {
 }
 
 /// A recurring rule as shown to the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecurringRecord {
     pub id: i64,
     pub account_id: i64,
@@ -394,6 +394,9 @@ fn schedule_of(rule: &RuleRow) -> Option<(Schedule, Date)> {
     .ok()?;
     Some((schedule, parse_iso_date(&rule.next_due).ok()?))
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(RecurringRecord);
 
 #[cfg(test)]
 mod tests {

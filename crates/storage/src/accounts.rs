@@ -10,7 +10,7 @@ use crate::{db::Db, error::StorageError};
 
 const DEFAULT_CURRENCY: Currency = Currency::IDR;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Account {
     pub id: i64,
     pub name: String,
@@ -170,6 +170,9 @@ fn read_raw(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawAccount> {
         balance: row.get(8)?,
     })
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(Account);
 
 #[cfg(test)]
 mod tests {

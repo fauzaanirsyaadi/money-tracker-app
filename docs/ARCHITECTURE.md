@@ -473,16 +473,16 @@ Diperbarui 2026-10-14 sebelum Fase 7. Tidak ada yang diperbaiki di sini; ini daf
 
 | ID | Tingkat | Temuan | Lokasi | Rencana |
 |---|---|---|---|---|
-| M5 | Sedang | Kunci ada tetapi `money.db` hilang/kosong: `Db::open` membuat DB baru yang kosong tanpa kabar (kebalikannya, DB ada tanpa kunci, sudah ditolak lewat `KeyMissing`). Pengguna melihat data hilang tanpa penjelasan. | `src-tauri/src/vault.rs:85-91` (cabang kunci ada), `crates/storage/src/db.rs:30` (`Db::open`) | Fase 7 langkah C: tolak dan laporkan "database hilang" bila `db.key` ada; tawarkan restore dari backup |
-| L1 | Rendah | `#[derive(Debug)]` pada `Money` mencetak jumlah, bisa bocor ke log lewat `{:?}` | `crates/core/src/money.rs:12` | Langkah C: `Debug` manual yang menyamarkan nilai; tes bahwa `format!("{:?}")` tidak memuat angka |
-| L2 | Rendah | `Currency::new` menerima eksponen yang salah untuk kode yang dikenal (mis. `IDR` dengan eksponen 2) | `crates/core/src/currency.rs:49` | Langkah C: validasi terhadap tabel kode dikenal |
-| L3 | Rendah | `getKey` mengembalikan null bila alias hilang lalu `key()` **membuat kunci baru**; `unwrap` lalu gagal dengan kesalahan GCM yang menyesatkan, dan kunci baru menimpa kemungkinan pemulihan | `src-tauri/plugins/mt-keystore/.../KeyVault.kt:20,46` | Langkah C: `unwrap` tidak pernah membuat kunci; hanya `wrap` yang boleh |
+| M5 | Sedang | **Selesai di Fase 7C (§25).** Kunci ada tetapi `money.db` hilang/kosong: `Db::open` membuat DB baru yang kosong tanpa kabar (kebalikannya, DB ada tanpa kunci, sudah ditolak lewat `KeyMissing`). Pengguna melihat data hilang tanpa penjelasan. | `src-tauri/src/vault.rs:85-91` (cabang kunci ada), `crates/storage/src/db.rs:30` (`Db::open`) | Fase 7 langkah C: tolak dan laporkan "database hilang" bila `db.key` ada; tawarkan restore dari backup |
+| L1 | Rendah | **Selesai di 7C.** `#[derive(Debug)]` pada `Money` mencetak jumlah, bisa bocor ke log lewat `{:?}` | `crates/core/src/money.rs:12` | Langkah C: `Debug` manual yang menyamarkan nilai; tes bahwa `format!("{:?}")` tidak memuat angka |
+| L2 | Rendah | **Selesai di 7C.** `Currency::new` menerima eksponen yang salah untuk kode yang dikenal (mis. `IDR` dengan eksponen 2) | `crates/core/src/currency.rs:49` | Langkah C: validasi terhadap tabel kode dikenal |
+| L3 | Rendah | **Selesai di 7C.** `getKey` mengembalikan null bila alias hilang lalu `key()` **membuat kunci baru**; `unwrap` lalu gagal dengan kesalahan GCM yang menyesatkan, dan kunci baru menimpa kemungkinan pemulihan | `src-tauri/plugins/mt-keystore/.../KeyVault.kt:20,46` | Langkah C: `unwrap` tidak pernah membuat kunci; hanya `wrap` yang boleh |
 | L4 | Rendah | Salinan kunci sebagai hex/stack tidak di-zeroize sepenuhnya | `crates/storage/src/db.rs:111` (literal sudah `Zeroizing`; salinan pada tumpukan SQLCipher/Kotlin tidak terjangkau) | Batas yang diketahui; dicatat di SECURITY.md |
-| L5 | Rendah | FileProvider mengekspos `external-path` dan `cache-path` seluruhnya | `src-tauri/gen/android/app/src/main/res/xml/file_paths.xml:3-4` | Langkah B: sempitkan ke direktori ekspor khusus atau hapus FileProvider bila SAF cukup |
+| L5 | Rendah | **Selesai di 7C.** FileProvider mengekspos `external-path` dan `cache-path` seluruhnya | `src-tauri/gen/android/app/src/main/res/xml/file_paths.xml:3-4` | Langkah B: sempitkan ke direktori ekspor khusus atau hapus FileProvider bila SAF cukup |
 | L6 | Rendah | CI: aksi tidak di-pin ke SHA, tanpa `timeout-minutes`, komentar job `android` | `.github/workflows/ci.yml:23-106` | Setelah CI pertama berjalan |
 | L7 | Info | `mt-core` belum dipakai `mt-storage` | — | **Selesai** di Fase 5 (`mt-storage` memakai `mt_core` di `categories.rs`, `transactions.rs`) |
-| L8 | Rendah | `allow(dead_code)` tingkat modul | `src-tauri/src/vault.rs:2` | Langkah C: persempit ke item, atau hapus setelah kunci dibuka dari alur kunci aplikasi |
-| L9 | Rendah | Migrasi membaca `user_version` sebelum `BEGIN IMMEDIATE`; dua proses bisa sama-sama menjalankan migrasi yang sama | `crates/storage/src/db.rs:61` vs `:71` | Langkah C: baca versi di dalam transaksi |
+| L8 | Rendah | **Selesai di 7C** (tidak ada lagi `allow(dead_code)` tingkat modul). `allow(dead_code)` tingkat modul | `src-tauri/src/vault.rs:2` | Langkah C: persempit ke item, atau hapus setelah kunci dibuka dari alur kunci aplikasi |
+| L9 | Rendah | **Selesai di 7C.** Migrasi membaca `user_version` sebelum `BEGIN IMMEDIATE`; dua proses bisa sama-sama menjalankan migrasi yang sama | `crates/storage/src/db.rs:61` vs `:71` | Langkah C: baca versi di dalam transaksi |
 | L10 | — | **Tidak ada**: daftar review asli berhenti di L9 (L7–L9 digabung), tidak ada temuan L10 | — | Bila review lain memakai L10, mohon sebut isinya |
 
 ---
@@ -906,3 +906,84 @@ Angka perangkat kelas bawah menunggu Fase 8.
 | Jam dinding host melompat berjam-jam di antara beberapa pemanggilan (host/sandbox tertahan), tampak seperti `adb install` macet 15 menit | Bukan galat aplikasi; batas waktu skrip E2E dilonggarkan (240 dtk per picker) |
 | Satu ANR `com.moneytracker.app` saat mengetik di smoke test, ketika load host 8–12 | Jejak: thread utama menunggu `ThreadedRenderer.syncAndDrawFrame` (render thread/GPU emulator), bukan kode aplikasi, sama dengan temuan Fase 6. Lulus pada ulangan dengan host lebih tenang. Perlu dipantau di perangkat nyata (Fase 8) |
 | Emulator menjadi lamban setelah uji reboot (ANR Pixel Launcher/System UI) | Emulator dimulai ulang dingin; tidak terkait aplikasi |
+
+---
+
+## 25. Fase 7, langkah C: temuan tertunda (2026-10-16)
+
+### Pra-C
+
+| Butir | Hasil |
+|---|---|
+| Frasa sandi NFKC | `mt-backup` menormalkan frasa sandi dengan Unicode NFKC sebelum Argon2id. **Format versi 2** mencatatnya; versi 1 (tak pernah dirilis) ditolak. Tes: aksen tergabung vs terurai, huruf lebar penuh dan ligatur membuka cadangan yang sama; frasa berbeda tetap gagal. Kebijakan panjang dihitung pada bentuk ternormalisasi (UI memakai `normalize("NFKC")` yang sama) |
+| Pesan galat potongan pertama | "wrong passphrase or **corrupted** backup" untuk potongan pertama; "the backup is corrupted" untuk kerusakan berikutnya (Rust dan UI), dengan tes |
+| Berkas sementara setelah crash | `remove_leftovers` (cache: `export-*.mtbak`, `restore-input.mtbak`; data: `restore-staged.db*`) dipanggil saat start; tes memeriksa yang dihapus dan yang **tidak** boleh dihapus (`money.db`, `db.key`, `lock.json`) |
+| StrictMode | `ThreadPolicy` (disk read/write, network, `penaltyLog`) pada build debug. Hasil di bawah |
+
+#### Pelanggaran StrictMode (smoke `--lock` + sebagian E2E backup, emulator, 94 pelanggaran)
+
+| Jumlah | Maks | Jenis | Sumber |
+|---|---|---|---|
+| 50 | **3 413 ms** | DiskRead | `System.loadLibrary` di `Rust.<clinit>`: memuat pustaka native **debug 160 MB** di thread utama saat `onCreate` (kode hasil generator Tauri). Pustaka rilis 10 MB; angka rilis perlu diukur di HP |
+| 22 | 198 ms | DiskRead/Write | `app.tauri.PathPlugin.getCacheDir/getDataDir` (Tauri) |
+| ~24 | 198 ms | DiskRead/Write | **Plugin kita**: `KeyVault.key/wrap/unwrap/generate` (operasi Keystore; plugin Tauri berjalan di **thread utama**), `PlatformPlugin.insideCache` (`canonicalFile`) |
+| 0 | — | Network | — |
+
+StrictMode hanya melihat I/O Java/Kotlin, **bukan** I/O native Rust (pembukaan DB, `lock.json`, Argon2 di `setup` berjalan di thread utama dan tidak terlihat). Tidak ada yang diubah (di luar ruang lingkup); dicatat untuk Fase 8: operasi Keystore dan `insideCache` dapat dipindah dari thread utama, dan waktu mulai dingin di perangkat nyata perlu diukur.
+
+### Butir 1: M5 + L3, tidak ada yang dibuat diam-diam
+
+**Aturan:** database dan kunci hanya dibuat pada *first run sebenarnya*: tidak ada `money.db` (berisi), tidak ada `db.key`, tidak ada `lock.json`. Selain itu, bila data hilang atau tidak terbaca, aplikasi tidak membuat apa pun dan menampilkan layar pemulihan.
+
+Matriks keadaan (diuji: `classify` pada 8 kombinasi, dan pembukaan nyata dengan DB SQLCipher; setiap penolakan dibuktikan **tidak mengubah satu berkas pun**):
+
+| `money.db` | `db.key` | `lock.json` | Hasil |
+|---|---|---|---|
+| tidak | tidak | tidak | **First run**: kunci dan DB dibuat |
+| tidak | tidak | ada | Pemulihan `database_missing` |
+| tidak | ada | tidak | Pemulihan `database_missing` (M5) |
+| tidak | ada | ada | Pemulihan `database_missing` |
+| ada | tidak | tidak | Pemulihan `key_missing` |
+| ada | tidak | ada | Pemulihan `key_missing` |
+| ada | ada | tidak | Siap |
+| ada | ada | ada | Siap setelah buka kunci |
+
+Aturan tambahan: `money.db` berukuran 0 dianggap hilang (SQLite akan membuatnya jadi DB kosong); hanya `money.db.old` (restore terputus) dianggap ada dan dipulihkan lebih dulu; satu berkas kosong saja tanpa kunci/lock tetap first run (tidak ada data yang hilang).
+
+**Keystore (L3):** `unwrap` **tidak pernah membuat kunci**; hanya `wrap` boleh. Kotlin membedakan kehilangan permanen (alias hilang, `KeyPermanentlyInvalidatedException`, blob tidak lolos autentikasi, blob terlalu pendek) dari kegagalan sementara. Yang permanen memberi `key_unusable` (layar pemulihan); **kegagalan sementara hanya memberi "Coba lagi"**, tanpa tombol destruktif, tanpa membuat apa pun. DB yang dibuat aplikasi *lebih baru* tidak pernah ditawarkan untuk diganti.
+
+| Kegagalan | Keadaan |
+|---|---|
+| Alias Keystore hilang / dibatalkan / blob rusak | `key_unusable` |
+| Kunci membuka tetapi DB tidak (kunci salah, berkas rusak) | `database_unreadable` |
+| Keystore sibuk, perangkat terkunci, I/O sementara | `retry` (tidak ada yang diubah) |
+| Skema DB lebih baru dari aplikasi | `retry` (bukan pemulihan) |
+
+**Jalan keluar, keduanya eksplisit:**
+- *Pulihkan dari cadangan*: alur restore yang sama (pilih berkas, frasa sandi, pratinjau, konfirmasi), tetapi membangun kunci **baru**: kunci Keystore lama dihapus, kunci baru dibungkus, `db.key` ditulis dulu, berkas lama dibuang, DB disusun, lalu `lock.json` dihapus terakhir (PIN lama milik data lama; dipasang ulang). Urutan ini memastikan crash di titik mana pun tetap terbaca sebagai pemulihan, bukan first run.
+- *Mulai dari awal*: butuh `confirm = true` yang menyatakan data lama akan hilang; tanpa itu perintah ditolak.
+
+Layar pemulihan ditampilkan **sebelum** layar PIN (data yang hilang tidak dilindungi PIN; orang yang tahu frasa sandi cadangan sudah memiliki datanya).
+
+**Uji emulator (`android_backup_e2e.mjs`, kini 61 pemeriksaan):** DB dihapus → `database_missing`, tidak ada DB yang dibuat, perintah data ditolak, "mulai baru" tanpa konfirmasi ditolak, restore lewat picker identik; DB 0 byte → `database_missing`; kunci diganti 60 byte acak → `key_unusable`, DB tidak tersentuh, restore identik; `db.key` dihapus → `key_missing`, tidak ada kunci dibuat, "mulai baru" butuh konfirmasi lalu menghasilkan DB kosong yang dapat dipakai; `lock.json` ada tanpa data → `database_missing` meski terkunci, restore mengganti data **dan** menghapus PIN lama.
+
+### Butir 2: L1, `Debug` tidak mencetak jumlah
+
+- `Money` punya `Debug` manual: `Money(<redacted> IDR)` (mata uang boleh, jumlah tidak).
+- Makro `mt_core::redacted_debug!` menggantikan `derive(Debug)` pada **39 tipe** (ditambah `Money` yang manual) yang memegang jumlah, nama, catatan, atau hash PIN: draft dan rekaman domain, rekaman dan laporan penyimpanan, seluruh DTO dan input perintah, dan `Record` kunci aplikasi. Tipe galat tidak membawa nilai dan tetap derive.
+- **Penjaga CI:** `scripts/check_debug_redaction.py` (8 tes) menggagalkan `derive(Debug)` baru pada tipe yang bidangnya bernama `amount*`, `*_minor`, `balance*`, `limit*`, `opening*`, `note`, `name`, `total*`, `pin_hash`, `Money`, dll. kecuali ditandai `// debug-safe: <alasan>`.
+- Tes: `Money` di dalam `Vec`/`Option`/`Result` dan format `{:#?}`; semua tipe nilai inti; rekaman yang dibaca dari DB; semua input dan output perintah aplikasi.
+- Batas: `DbKey = Zeroizing<[u8; 32]>` masih mencetak byte kunci bila diformat dengan `{:?}`; tidak ada kode yang melakukannya dan tipenya milik pustaka. Dicatat, bukan diubah.
+
+### Butir 3: L2, eksponen mata uang
+
+`Currency::new(kode, eksponen)` menolak eksponen yang salah untuk kode yang dikenal (`IDR` dengan 2 desimal akan membaca `1000` sebagai `10,00`: semua jumlah ×100). Kode yang tidak ada di tabel (mis. `BHD`) diterima dengan eksponen yang disebutkan (0–4). Tes: setiap mata uang tabel dengan setiap eksponen salah; IDR 0 / USD 2 / KWD 3 (3 desimal); `BHD` 3; parse dan cetak per eksponen (`1500000`, `12.34`, `1.234`, penolakan desimal berlebih); pembulatan rasio tetap sama.
+
+### Butir 4: L5, FileProvider dihapus
+
+Satu-satunya pemakai adalah kamera di pemilih berkas WebView hasil generator, yang tidak pernah dipanggil (tidak ada `<input type=file>`; backup memakai picker SAF lewat plugin). `file_paths.xml` membuka `external-path` dan `cache-path` seluruhnya. Provider dan berkas itu dihapus. `check_offline.py` (manifest dan APK jadi) kini gagal bila `FileProvider` muncul lagi, misalnya setelah `tauri android init` menimpa manifes.
+
+### Butir 5: L8 dan L9
+
+- **L8:** tidak ada lagi `allow(dead_code)` tingkat modul (dihapus di langkah A); yang tersisa per-item, berdasar alasan.
+- **L9:** migrasi membaca `user_version` **di dalam** `BEGIN IMMEDIATE`. Tes: empat koneksi membuka DB versi 1 bersamaan, 12 putaran, setiap migrasi berjalan **sekali** (12 kategori bawaan, tidak ganda); langkah migrasi yang gagal di-rollback tanpa menaikkan versi dan tanpa transaksi menggantung.

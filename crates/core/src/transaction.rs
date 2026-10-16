@@ -86,7 +86,7 @@ pub fn normalize_category_name(raw: &str) -> Result<String, TransactionError> {
 }
 
 /// A validated income or expense.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TransactionDraft {
     account_id: i64,
     category_id: i64,
@@ -153,7 +153,7 @@ impl TransactionDraft {
 }
 
 /// A validated transfer between two different accounts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TransferDraft {
     from_account_id: i64,
     to_account_id: i64,
@@ -207,7 +207,7 @@ impl TransferDraft {
 }
 
 /// A validated new category. `parent_id` makes it a sub-category (one level).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CategoryDraft {
     name: String,
     kind: FlowKind,
@@ -239,6 +239,9 @@ impl CategoryDraft {
         self.parent_id
     }
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+crate::redacted_debug!(TransactionDraft, TransferDraft, CategoryDraft);
 
 #[cfg(test)]
 mod tests {

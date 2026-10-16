@@ -339,7 +339,21 @@ export interface LockStatus {
   failedAttempts: number;
   /** Milliseconds until another PIN guess is allowed, or null. */
   retryAfterMs: number | null;
+  /** Whether the stored data can be used; see `StorageState`. */
+  storage: StorageState;
 }
+
+/**
+ * `ok`; `retry` for a failure that may pass (nothing was changed); or, when
+ * the data is lost or unreadable, the reason recovery is on offer.
+ */
+export type StorageState =
+  | "ok"
+  | "retry"
+  | "database_missing"
+  | "key_missing"
+  | "key_unusable"
+  | "database_unreadable";
 
 export const AUTO_LOCK_CHOICES = [0, 30, 60, 300] as const;
 
@@ -381,4 +395,14 @@ export const backup = {
   /** Step 3: replace current data with the verified backup. */
   restoreCommit: () => call<BackupCounts>("backup_restore_commit"),
   restoreCancel: () => call<void>("backup_restore_cancel"),
+};
+
+export const recovery = {
+  /** Tries again after a failure that may have passed. */
+  retry: () => call<LockStatus>("recovery_retry"),
+  /**
+   * Discards unreadable data and starts with an empty database. Only after the
+   * user confirmed that the existing data will be lost.
+   */
+  startFresh: (confirm: boolean) => call<LockStatus>("recovery_start_fresh", { confirm }),
 };

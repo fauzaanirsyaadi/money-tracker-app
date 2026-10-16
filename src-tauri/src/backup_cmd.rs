@@ -5,12 +5,17 @@
 //! the user confirms with the facts in front of them: choose a file, enter the
 //! passphrase (verified and staged without touching live data), then confirm.
 
-use std::{fs, io, path::PathBuf, time::Instant};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use mt_backup::KdfParams;
 use mt_storage::{Db, LogicalSummary};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_mt_keystore::MtKeystoreExt;
 use tauri_plugin_mt_platform::{FileOutcome, MtPlatformExt};
 use zeroize::Zeroizing;
 
@@ -27,7 +32,7 @@ const STAGED_FILE: &str = "restore-staged.db";
 const EXPORT_PREFIX: &str = "export-";
 const DEFAULT_NAME: &str = "money-tracker.mtbak";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CountsDto {
     pub accounts: u64,
@@ -72,7 +77,7 @@ impl From<BackupFailure> for AppError {
             }
             BackupFailure::WrongPassphrase => Self::new(
                 ErrorCode::WrongPassphrase,
-                "wrong passphrase or damaged backup",
+                "wrong passphrase or corrupted backup",
             ),
             BackupFailure::NotABackup => {
                 Self::new(ErrorCode::NotABackup, "not a Money Tracker backup")
@@ -81,10 +86,9 @@ impl From<BackupFailure> for AppError {
                 ErrorCode::UnsupportedBackup,
                 "the backup was made by a newer version",
             ),
-            BackupFailure::Damaged => Self::new(
-                ErrorCode::BackupDamaged,
-                "the backup is incomplete or damaged",
-            ),
+            BackupFailure::Damaged => {
+                Self::new(ErrorCode::BackupDamaged, "the backup is corrupted")
+            }
             BackupFailure::Io | BackupFailure::Storage => Self::new(
                 ErrorCode::Internal,
                 "could not complete the backup operation",
@@ -95,6 +99,16 @@ impl From<BackupFailure> for AppError {
 
 fn internal() -> AppError {
     AppError::new(ErrorCode::Internal, "internal error")
+}
+
+/// Restoring is allowed when unlocked, and also from the recovery screen,
+/// where there is no readable data and so nothing for a PIN to protect.
+fn require_unlocked_or_recovering(state: &AppState) -> Result<(), AppError> {
+    if state.recovering() {
+        Ok(())
+    } else {
+        require_unlocked(state)
+    }
 }
 
 /// Keeps only characters that are safe in a file name suggested to the picker.
@@ -122,9 +136,17 @@ fn cache_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
 /// Deletes files a previous run may have left behind (crash, process death
 /// while a picker was open). Safe to call at startup.
 pub fn clean_leftovers(app: &AppHandle) {
-    if let Ok(cache) = app.path().app_cache_dir() {
+    let cache = app.path().app_cache_dir().ok();
+    let data = vault::data_dir(app).ok();
+    remove_leftovers(cache.as_deref(), data.as_deref());
+}
+
+/// The part of [`clean_leftovers`] that needs no Tauri: temporary ciphertext in
+/// the cache (exports in flight, a chosen restore file) and a staged database.
+fn remove_leftovers(cache: Option<&Path>, data: Option<&Path>) {
+    if let Some(cache) = cache {
         let _ = fs::remove_file(cache.join(PICKED_FILE));
-        if let Ok(entries) = fs::read_dir(&cache) {
+        if let Ok(entries) = fs::read_dir(cache) {
             for entry in entries.flatten() {
                 if entry
                     .file_name()
@@ -136,8 +158,8 @@ pub fn clean_leftovers(app: &AppHandle) {
             }
         }
     }
-    if let Ok(dir) = vault::data_dir(app) {
-        backup::remove_database(&dir.join(STAGED_FILE));
+    if let Some(data) = data {
+        backup::remove_database(&data.join(STAGED_FILE));
     }
 }
 
@@ -220,7 +242,7 @@ pub async fn backup_restore_pick(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<bool, AppError> {
-    require_unlocked(&state)?;
+    require_unlocked_or_recovering(&state)?;
     state.clear_restore();
     let destination = cache_dir(&app)?.join(PICKED_FILE);
 
@@ -249,7 +271,8 @@ pub async fn backup_restore_prepare(
     state: State<'_, AppState>,
     passphrase: String,
 ) -> Result<RestorePreviewDto, AppError> {
-    require_unlocked(&state)?;
+    require_unlocked_or_recovering(&state)?;
+    let recovering = state.recovering();
     let passphrase = Zeroizing::new(passphrase);
     let picked = state
         .restore_session(|s| s.picked.clone())
@@ -269,17 +292,28 @@ pub async fn backup_restore_prepare(
     let result = {
         let (app, picked, staged_path) = (app.clone(), picked.clone(), staged_path.clone());
         blocking(move || {
-            let key = vault::load_existing_key(&app).map_err(|_| internal())?;
+            // Replacing unreadable data needs a new key; otherwise the live one is reused.
+            let key = if recovering {
+                vault::fresh_key().map_err(|_| internal())?
+            } else {
+                vault::load_existing_key(&app).map_err(|_| internal())?
+            };
             let file = fs::File::open(&picked).map_err(|_| internal())?;
-            backup::stage_restore(file, &passphrase, &key, &staged_path).map_err(AppError::from)
+            let summary = backup::stage_restore(file, &passphrase, &key, &staged_path)
+                .map_err(AppError::from)?;
+            Ok((summary, key))
         })
         .await
     };
 
     match result {
-        Ok(summary) => {
-            let current =
-                state.with_db(|db| db.export_logical(&mut io::sink()).map_err(AppError::from))?;
+        Ok((summary, key)) => {
+            let current = if recovering {
+                // Nothing readable is being replaced.
+                LogicalSummary::default()
+            } else {
+                state.with_db(|db| db.export_logical(&mut io::sink()).map_err(AppError::from))?
+            };
             let preview = RestorePreviewDto {
                 backup: CountsDto::from(&summary),
                 current: CountsDto::from(&current),
@@ -293,6 +327,7 @@ pub async fn backup_restore_prepare(
                     path: staged_path,
                     summary,
                 });
+                s.fresh_key = recovering.then_some(key);
             });
             Ok(preview)
         }
@@ -314,10 +349,12 @@ pub async fn backup_restore_commit(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CountsDto, AppError> {
-    require_unlocked(&state)?;
+    require_unlocked_or_recovering(&state)?;
+    let recovering = state.recovering();
     let staged = state
         .restore_session(|s| s.staged.take())
         .ok_or_else(|| AppError::invalid("no verified backup is waiting"))?;
+    let fresh_key = state.restore_session(|s| s.fresh_key.take());
     // The picked copy (if any) is stale from here on.
     state.restore_session(|s| {
         if let Some(path) = s.picked.take() {
@@ -327,9 +364,49 @@ pub async fn backup_restore_commit(
 
     blocking(move || {
         let state = app.state::<AppState>();
-        commit(&app, &state, &staged)
+        match (recovering, fresh_key) {
+            (true, Some(key)) => commit_recovery(&app, &state, &staged, &key),
+            (true, None) => Err(internal()),
+            (false, _) => commit(&app, &state, &staged),
+        }
     })
     .await
+}
+
+/// Replaces data that cannot be read with the staged backup, under a new key.
+/// The user confirmed this on the recovery screen.
+fn commit_recovery(
+    app: &AppHandle,
+    state: &AppState,
+    staged: &StagedRestore,
+    key: &mt_storage::DbKey,
+) -> Result<CountsDto, AppError> {
+    let dir = vault::data_dir(app).map_err(|_| internal())?;
+    let keystore = app.mt_keystore();
+    state.close_db();
+    // The old wrapping key is unusable or absent; a new one wraps the new key.
+    keystore.reset().map_err(|_| internal())?;
+    let blob = keystore.wrap(key.as_slice()).map_err(|_| internal())?;
+    vault::install_recovered_database(&dir, &blob, &staged.path).map_err(|_| internal())?;
+    // The PIN belonged to the old data. It is set again afterwards.
+    state.applock().erase().map_err(|_| internal())?;
+
+    // Open it the normal way and make sure it holds exactly what was staged.
+    let verified = vault::open_database(app).ok().and_then(|db| {
+        let found = db.export_logical(&mut io::sink()).ok()?;
+        (found == staged.summary).then_some(db)
+    });
+    match verified {
+        Some(db) => {
+            state.install_db(db);
+            state.set_problem(None);
+            Ok(CountsDto::from(&staged.summary))
+        }
+        None => {
+            crate::recovery::initialize(app, state);
+            Err(AppError::from(BackupFailure::Damaged))
+        }
+    }
 }
 
 fn commit(
@@ -396,6 +473,49 @@ mod tests {
         assert_eq!(safe_file_name(""), DEFAULT_NAME);
         assert_eq!(safe_file_name("...."), DEFAULT_NAME);
         assert_eq!(safe_file_name(&"a".repeat(200)).len(), 60 + ".mtbak".len());
+    }
+
+    #[test]
+    fn leftovers_from_a_crash_are_removed_at_startup() {
+        let root = std::env::temp_dir().join(format!("mt-leftovers-{}", std::process::id()));
+        let (cache, data) = (root.join("cache"), root.join("data"));
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        // What a crash mid-export, mid-pick or mid-restore leaves behind...
+        let leftovers = [
+            cache.join("export-0011223344556677.mtbak"),
+            cache.join("export-aabbccddeeff0011.mtbak"),
+            cache.join(PICKED_FILE),
+            data.join(STAGED_FILE),
+            data.join(format!("{STAGED_FILE}-wal")),
+            data.join(format!("{STAGED_FILE}-shm")),
+        ];
+        for file in &leftovers {
+            fs::write(file, b"ciphertext or staged data").unwrap();
+        }
+        // ...and files that must survive.
+        let keep = [
+            cache.join("something-else.tmp"),
+            data.join(crate::backup::LIVE_DB),
+            data.join("db.key"),
+            data.join("lock.json"),
+        ];
+        for file in &keep {
+            fs::write(file, b"keep").unwrap();
+        }
+
+        remove_leftovers(Some(&cache), Some(&data));
+
+        for file in &leftovers {
+            assert!(!file.exists(), "{} was not removed", file.display());
+        }
+        for file in &keep {
+            assert!(file.exists(), "{} must not be removed", file.display());
+        }
+        // Running it again on a clean directory, or with no directories, is harmless.
+        remove_leftovers(Some(&cache), Some(&data));
+        remove_leftovers(None, None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -321,7 +321,7 @@ pub fn format_iso_date(date: Date) -> String {
 
 /// A validated new recurring rule. The schedule's anchor day is the start
 /// date's day of month, so the start is always an occurrence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecurringDraft {
     account_id: i64,
     category_id: i64,
@@ -400,7 +400,7 @@ impl RecurringDraft {
 /// The fields of a rule that may change after creation. The schedule and the
 /// kind are fixed: changing them would silently rewrite what "due" means for
 /// transactions already generated, so such a change is a delete and recreate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RecurringEdit {
     account_id: i64,
     category_id: i64,
@@ -470,6 +470,9 @@ impl fmt::Display for RuleError {
 }
 
 impl std::error::Error for RuleError {}
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+crate::redacted_debug!(RecurringDraft, RecurringEdit);
 
 #[cfg(test)]
 mod tests {

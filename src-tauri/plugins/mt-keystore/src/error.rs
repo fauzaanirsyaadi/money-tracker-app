@@ -9,8 +9,12 @@ pub enum Error {
     Unsupported,
     /// The plugin returned malformed data.
     BadResponse,
-    /// The Keystore refused the operation (missing key, auth failure, tampered blob).
+    /// The Keystore failed in a way that may pass (service busy, device
+    /// locked). Nothing should be created or deleted because of it.
     Keystore,
+    /// The wrapping key is permanently unusable: the alias is gone, the key was
+    /// invalidated, or the blob no longer authenticates under it.
+    KeyGone,
 }
 
 impl fmt::Display for Error {
@@ -19,6 +23,7 @@ impl fmt::Display for Error {
             Self::Unsupported => "keystore unsupported on this platform",
             Self::BadResponse => "malformed keystore response",
             Self::Keystore => "keystore operation failed",
+            Self::KeyGone => "the keystore key is gone or unusable",
         })
     }
 }
@@ -27,7 +32,14 @@ impl std::error::Error for Error {}
 
 #[cfg(mobile)]
 impl From<tauri::plugin::mobile::PluginInvokeError> for Error {
-    fn from(_: tauri::plugin::mobile::PluginInvokeError) -> Self {
-        Self::Keystore
+    fn from(err: tauri::plugin::mobile::PluginInvokeError) -> Self {
+        use tauri::plugin::mobile::PluginInvokeError::InvokeRejected;
+        match err {
+            // Kotlin rejects with the code `key_gone` only for permanent loss.
+            InvokeRejected(response) if response.code.as_deref() == Some("key_gone") => {
+                Self::KeyGone
+            }
+            _ => Self::Keystore,
+        }
     }
 }

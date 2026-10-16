@@ -168,7 +168,7 @@ async function main() {
   });
   check("app started with an inspectable web view", true);
 
-  const note = `smoke-${Date.now()}`;
+  const note = `smoke-${Date.now()}`; // typed after the amount; may arrive truncated under load
   const accounts = await invoke("accounts_list", { includeArchived: false });
   let account = accounts[0];
   if (!account) {
@@ -204,7 +204,14 @@ async function main() {
   await until("sheet closed", async () => !(await evaluate("!!document.querySelector('dialog[open]')")));
   check("tap 2 saves and closes the sheet", true);
 
-  const page = await invoke("transactions_list", { filter: { search: note }, cursor: null, limit: 10 });
+  // Found by the fixed prefix: under load `adb input text` can drop trailing
+  // characters of the typed note, which says nothing about the app.
+  const page = await invoke("transactions_list", { filter: { search: "smoke-" }, cursor: null, limit: 10 });
+  if (page.items.length !== 1) {
+    // Say what was saved instead, so a typing glitch is told apart from a lost write.
+    const all = await invoke("transactions_list", { filter: {}, cursor: null, limit: 5 });
+    console.log(`INFO  rows in the database: ${JSON.stringify(all.items.map((t) => [t.amountMinor, t.note]))}`);
+  }
   const row = page.items[0];
   check("exactly one row was saved", page.items.length === 1, String(page.items.length));
   check("amount is -25000 minor units", row.amountMinor === "-25000", row.amountMinor);

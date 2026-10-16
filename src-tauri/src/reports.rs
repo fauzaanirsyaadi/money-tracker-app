@@ -8,7 +8,7 @@ use tauri::State;
 
 use crate::{accounts::AccountDto, error::AppError, state::AppState};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSpendingDto {
     pub category_id: i64,
@@ -17,7 +17,7 @@ pub struct ChildSpendingDto {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CategorySpendingDto {
     pub category_id: i64,
@@ -29,7 +29,7 @@ pub struct CategorySpendingDto {
     pub children: Vec<ChildSpendingDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpendingReportDto {
     pub from: String,
@@ -40,7 +40,7 @@ pub struct SpendingReportDto {
     pub categories: Vec<CategorySpendingDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonthDto {
     pub month: String,
@@ -60,7 +60,7 @@ pub struct TrendDto {
     pub months: Vec<MonthDto>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetWorthDto {
     pub currency: String,
@@ -178,6 +178,15 @@ pub async fn report_trend(
 pub async fn report_net_worth(state: State<'_, AppState>) -> Result<NetWorthDto, AppError> {
     state.with_db(|db| net_worth(db))
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(
+    ChildSpendingDto,
+    CategorySpendingDto,
+    SpendingReportDto,
+    MonthDto,
+    NetWorthDto
+);
 
 #[cfg(test)]
 mod tests {

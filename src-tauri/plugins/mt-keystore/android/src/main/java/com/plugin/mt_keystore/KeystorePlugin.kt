@@ -42,6 +42,16 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
         }
     }
 
+    @Command
+    fun reset(invoke: Invoke) {
+        try {
+            vault.reset()
+            invoke.resolve(JSObject())
+        } catch (e: Exception) {
+            invoke.reject("keystore")
+        }
+    }
+
     private fun respond(invoke: Invoke, op: (ByteArray) -> ByteArray) {
         try {
             val args = invoke.parseArgs(DataArgs::class.java)
@@ -49,6 +59,9 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
             val ret = JSObject()
             ret.put("data", Hex.encode(out))
             invoke.resolve(ret)
+        } catch (e: KeyGoneException) {
+            // Permanent loss, the one case the app may offer recovery for.
+            invoke.reject("keystore", "key_gone")
         } catch (e: Exception) {
             // Deliberately generic: exception text could echo sensitive state.
             invoke.reject("keystore")

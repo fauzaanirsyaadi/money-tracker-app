@@ -20,7 +20,7 @@ use crate::{accounts::parse_minor, error::AppError, state::AppState};
 /// Per rule per app open; the remainder continues on the next open.
 const CATCH_UP_LIMIT: usize = 1_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecurringDto {
     pub id: i64,
@@ -65,7 +65,7 @@ impl From<&RecurringRecord> for RecurringDto {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecurringInput {
     pub account_id: i64,
@@ -79,7 +79,7 @@ pub struct RecurringInput {
     pub end_on: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecurringEditInput {
     pub account_id: i64,
@@ -261,6 +261,9 @@ pub async fn recurring_catch_up(
 ) -> Result<CatchUpDto, AppError> {
     state.with_db(|db| catch_up(db, &today, now_unix()))
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(RecurringDto, RecurringInput, RecurringEditInput);
 
 #[cfg(test)]
 mod tests {

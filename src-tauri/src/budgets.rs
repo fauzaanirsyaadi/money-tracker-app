@@ -7,7 +7,7 @@ use tauri::State;
 
 use crate::{accounts::parse_minor, error::AppError, state::AppState};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetDto {
     pub id: i64,
@@ -49,7 +49,7 @@ impl From<&BudgetRecord> for BudgetDto {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetInput {
     pub category_id: i64,
@@ -101,6 +101,9 @@ pub async fn budget_set(
 pub async fn budget_delete(state: State<'_, AppState>, id: i64) -> Result<(), AppError> {
     state.with_db(|db| delete(db, id))
 }
+
+// Amounts, names and notes must never reach a log through `{:?}`.
+mt_core::redacted_debug!(BudgetDto, BudgetInput);
 
 #[cfg(test)]
 mod tests {

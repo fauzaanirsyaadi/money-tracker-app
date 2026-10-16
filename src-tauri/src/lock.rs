@@ -15,8 +15,8 @@ use zeroize::Zeroizing;
 use crate::{
     applock::{LockError, LockSnapshot},
     error::{AppError, ErrorCode},
-    state::AppState,
-    vault,
+    state::{AppState, StorageProblem},
+    vault::{self, RecoveryReason},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -32,10 +32,17 @@ pub struct LockStatusDto {
     pub auto_lock_seconds: u32,
     pub failed_attempts: u32,
     pub retry_after_ms: Option<u64>,
+    /// `ok`, `retry`, or why the data needs recovery: `database_missing`,
+    /// `key_missing`, `key_unusable`, `database_unreadable`.
+    pub storage: &'static str,
 }
 
 impl LockStatusDto {
-    fn new(snapshot: LockSnapshot, biometric: BiometricAvailability) -> Self {
+    fn new(
+        snapshot: LockSnapshot,
+        biometric: BiometricAvailability,
+        storage: &'static str,
+    ) -> Self {
         Self {
             configured: snapshot.configured,
             locked: snapshot.locked,
@@ -51,6 +58,7 @@ impl LockStatusDto {
             retry_after_ms: snapshot
                 .retry_after
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            storage,
         }
     }
 }
@@ -76,7 +84,20 @@ impl From<LockError> for AppError {
     }
 }
 
-async fn status_of(app: &AppHandle) -> LockStatusDto {
+pub(crate) fn storage_label(problem: Option<StorageProblem>) -> &'static str {
+    match problem {
+        None => "ok",
+        Some(StorageProblem::Retry) => "retry",
+        Some(StorageProblem::Recovery(reason)) => match reason {
+            RecoveryReason::DatabaseMissing => "database_missing",
+            RecoveryReason::KeyMissing => "key_missing",
+            RecoveryReason::KeyUnusable => "key_unusable",
+            RecoveryReason::DatabaseUnreadable => "database_unreadable",
+        },
+    }
+}
+
+pub(crate) async fn status_of(app: &AppHandle) -> LockStatusDto {
     let state = app.state::<AppState>();
     let snapshot = state.applock().snapshot(Instant::now());
     let biometric = app
@@ -84,7 +105,7 @@ async fn status_of(app: &AppHandle) -> LockStatusDto {
         .biometric_availability()
         .await
         .unwrap_or(BiometricAvailability::Unavailable);
-    LockStatusDto::new(snapshot, biometric)
+    LockStatusDto::new(snapshot, biometric, storage_label(state.problem()))
 }
 
 pub(crate) fn require_unlocked(state: &AppState) -> Result<(), AppError> {
@@ -99,7 +120,15 @@ pub(crate) fn require_unlocked(state: &AppState) -> Result<(), AppError> {
 /// failure leaves it locked instead of half-open.
 fn open_and_unlock(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
-    let db = vault::open_database(app).map_err(|_| AppError::unavailable())?;
+    let db = match vault::open_database(app) {
+        Ok(db) => db,
+        Err(err) => {
+            // The PIN was right but the data is not usable: say why instead of
+            // looking like a wrong PIN, and offer recovery only for real loss.
+            state.set_problem(Some(crate::recovery::problem_of(&err)));
+            return Err(AppError::unavailable());
+        }
+    };
     state.install_db(db);
     state.applock().mark_unlocked();
     Ok(())

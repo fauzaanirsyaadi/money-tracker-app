@@ -9,10 +9,18 @@ use crate::{currency::Currency, error::MoneyError};
 /// Largest magnitude of a `Money` value in minor units: `2^53 - 1`.
 pub const MAX_MINOR: i64 = (1_i64 << 53) - 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Money {
     minor: i64,
     currency: Currency,
+}
+
+/// Prints the currency but never the amount, so a stray `{:?}` (or a failed
+/// assertion in a log) cannot leak a balance.
+impl std::fmt::Debug for Money {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Money(<redacted> {})", self.currency.code())
+    }
 }
 
 impl Money {
@@ -502,5 +510,52 @@ mod tests {
                 assert_eq!(Money::parse_decimal(&text, currency), Ok(money), "{text}");
             }
         }
+    }
+
+    #[test]
+    fn parsing_and_printing_follow_the_currency_exponent() {
+        // IDR has no decimals, USD two, KWD three: the same digits mean different amounts.
+        let idr = Money::parse_decimal("1500000", Currency::IDR).unwrap();
+        assert_eq!(
+            (idr.minor(), idr.to_decimal_string().as_str()),
+            (1_500_000, "1500000")
+        );
+        assert!(
+            Money::parse_decimal("1500.5", Currency::IDR).is_err(),
+            "IDR has no decimals"
+        );
+
+        let usd = Money::parse_decimal("12.34", Currency::USD).unwrap();
+        assert_eq!(
+            (usd.minor(), usd.to_decimal_string().as_str()),
+            (1_234, "12.34")
+        );
+        assert_eq!(
+            Money::parse_decimal("12", Currency::USD).unwrap().minor(),
+            1_200
+        );
+        assert!(Money::parse_decimal("12.345", Currency::USD).is_err());
+
+        let kwd = Money::parse_decimal("1.234", Currency::KWD).unwrap();
+        assert_eq!(
+            (kwd.minor(), kwd.to_decimal_string().as_str()),
+            (1_234, "1.234")
+        );
+        assert_eq!(
+            Money::parse_decimal("0.001", Currency::KWD)
+                .unwrap()
+                .minor(),
+            1
+        );
+        assert!(Money::parse_decimal("1.2345", Currency::KWD).is_err());
+    }
+
+    #[test]
+    fn ratios_round_the_same_way_at_every_exponent() {
+        // 10 % of 1.234 KWD (1234 minor) is 123.4 minor units, half away from zero.
+        let kwd = Money::from_minor(1_234, Currency::KWD).unwrap();
+        assert_eq!(kwd.checked_mul_ratio(1, 10).unwrap().minor(), 123);
+        let idr = Money::from_minor(15, Currency::IDR).unwrap();
+        assert_eq!(idr.checked_mul_ratio(1, 2).unwrap().minor(), 8);
     }
 }

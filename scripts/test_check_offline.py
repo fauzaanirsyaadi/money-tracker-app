@@ -53,6 +53,18 @@ class ManifestTests(unittest.TestCase):
         problems = self.run_manifest(manifest(["android.permission.CAMERA"]))
         self.assertEqual(len(problems), 1)
 
+    def test_a_file_provider_is_refused(self):
+        provider = (
+            '<provider android:name="androidx.core.content.FileProvider" '
+            'android:authorities="x" android:exported="false"/>'
+        )
+        xml = manifest().replace("<application", "<application", 1).replace("/></manifest>", f">{provider}</application></manifest>")
+        problems = self.run_manifest(xml)
+        self.assertTrue(any("FileProvider" in p for p in problems), problems)
+        # Other providers (androidx startup) are fine.
+        other = xml.replace("androidx.core.content.FileProvider", "androidx.startup.InitializationProvider")
+        self.assertEqual(self.run_manifest(other), [])
+
     def test_backup_must_be_disabled(self):
         self.assertTrue(self.run_manifest(manifest(allowBackup="true")))
         self.assertTrue(self.run_manifest(manifest(allowBackup=None)))
@@ -118,6 +130,13 @@ class ApkTests(unittest.TestCase):
         finally:
             self.libs = {"lib/arm64-v8a/libapp.so": b"\x00ok\x00"}
         self.assertTrue(any("WebView debugging" in p for p in problems), problems)
+
+    def test_a_file_provider_in_the_built_apk_fails(self):
+        tree = TREE_OK + '        E: provider\n          A: android:name(0x01010003)="androidx.core.content.FileProvider" (Raw: "androidx.core.content.FileProvider")\n'
+        problems = self.run_apk(tree=tree)
+        self.assertTrue(any("FileProvider" in p for p in problems), problems)
+        ok = TREE_OK + '        E: provider\n          A: android:name(0x01010003)="androidx.startup.InitializationProvider" (Raw: "androidx.startup.InitializationProvider")\n'
+        self.assertEqual(self.run_apk(tree=ok), [])
 
     def test_empty_aapt_output_is_a_failure_not_a_pass(self):
         self.assertTrue(self.run_apk(permissions="", tree=""))

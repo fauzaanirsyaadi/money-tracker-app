@@ -70,28 +70,53 @@ impl Db {
         self.migrate_to(Self::SCHEMA_VERSION)
     }
 
+    /// Applies the migrations after the stored version, up to `target`.
+    ///
+    /// Each step reads `user_version` **inside** its own `BEGIN IMMEDIATE`
+    /// transaction. Reading it first and locking afterwards would let two
+    /// connections (two processes, or a restore running beside the app) both
+    /// decide the same migration is due, and the second would apply it twice.
     fn migrate_to(&self, target: u32) -> Result<(), StorageError> {
-        let found: u32 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let target = target.min(Self::SCHEMA_VERSION);
+        // A database from a newer app is refused before anything is touched.
+        let found = self.schema_version()?;
         if found > Self::SCHEMA_VERSION {
             return Err(StorageError::SchemaTooNew {
                 found,
                 supported: Self::SCHEMA_VERSION,
             });
         }
-        let target = target.min(Self::SCHEMA_VERSION);
-        for (index, sql) in MIGRATIONS
-            .iter()
-            .enumerate()
-            .skip(found as usize)
-            .take((target as usize).saturating_sub(found as usize))
-        {
-            let version = index + 1;
-            self.conn.execute_batch(&format!(
-                "BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;"
-            ))?;
+        for (index, sql) in MIGRATIONS.iter().enumerate().take(target as usize) {
+            let version = u32::try_from(index + 1).map_err(|_| StorageError::InvalidData)?;
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let step = self.apply_if_due(version, sql);
+            match step {
+                Ok(()) => self.conn.execute_batch("COMMIT")?,
+                Err(err) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(err);
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// Runs inside the write transaction opened by [`Db::migrate_to`].
+    fn apply_if_due(&self, version: u32, sql: &str) -> Result<(), StorageError> {
+        let found = self.schema_version()?;
+        if found > Self::SCHEMA_VERSION {
+            return Err(StorageError::SchemaTooNew {
+                found,
+                supported: Self::SCHEMA_VERSION,
+            });
+        }
+        if found >= version {
+            // Another connection applied it while we waited for the lock.
+            return Ok(());
+        }
+        self.conn.execute_batch(sql)?;
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {version};"))?;
         Ok(())
     }
 
@@ -589,5 +614,69 @@ mod tests {
             sql(&db, "UPDATE categories SET parent_id = 1 WHERE id = 1"),
             Err(StorageError::Constraint)
         );
+    }
+
+    #[test]
+    fn two_connections_opening_an_old_database_apply_each_migration_once() {
+        use std::sync::{Arc, Barrier};
+
+        for round in 0..12 {
+            let dir = TempDir::new();
+            let path = dir.file();
+            // A version-1 database, as an older app left it.
+            {
+                let conn = Connection::open(&path).unwrap();
+                let db = Db::init_to(conn, &key(7), 1).unwrap();
+                assert_eq!(db.schema_version(), Ok(1));
+            }
+            let barrier = Arc::new(Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Db::open(&path, &key(7)).map(|db| db.schema_version())
+                    })
+                })
+                .collect();
+            for handle in handles {
+                assert_eq!(
+                    handle.join().unwrap(),
+                    Ok(Ok(Db::SCHEMA_VERSION)),
+                    "round {round}"
+                );
+            }
+            // Migration 0002 seeds the default categories: exactly once.
+            let db = Db::open(&path, &key(7)).unwrap();
+            let seeded: i64 = db
+                .conn()
+                .query_row("SELECT count(*) FROM categories", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(seeded, 12, "round {round}: a migration ran twice");
+        }
+    }
+
+    #[test]
+    fn a_failed_migration_step_rolls_back_and_leaves_the_version_alone() {
+        let dir = TempDir::new();
+        let path = dir.file();
+        {
+            let db = Db::init_to(Connection::open(&path).unwrap(), &key(7), 1).unwrap();
+            // Make migration 0002 fail: its unique index cannot be created over duplicates.
+            db.conn()
+                .execute_batch(
+                    "INSERT INTO categories(name,kind) VALUES('Makanan','expense'),('Makanan','expense');",
+                )
+                .unwrap();
+        }
+        assert!(Db::open(&path, &key(7)).is_err());
+        let conn = Connection::open(&path).unwrap();
+        apply_key(&conn, &key(7)).unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "the failed step must not advance the version");
+        let in_txn = !conn.is_autocommit();
+        assert!(!in_txn, "no transaction may be left open");
     }
 }
