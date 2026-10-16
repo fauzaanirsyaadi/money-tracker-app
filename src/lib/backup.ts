@@ -8,7 +8,8 @@ export const PASSPHRASE_MAX = 128;
 
 /** Why `passphrase` cannot protect a new backup, or null when it can. */
 export function passphraseProblem(passphrase: string): string | null {
-  const chars = [...passphrase];
+  // Judged on the NFKC form, which is what the backup hashes.
+  const chars = [...passphrase.normalize("NFKC")];
   if (chars.length < PASSPHRASE_MIN) {
     return `Frasa sandi minimal ${PASSPHRASE_MIN} karakter (sekarang ${chars.length}).`;
   }
@@ -27,13 +28,13 @@ export function backupErrorMessage(code: ErrorCode): string {
     case "weak_passphrase":
       return "Frasa sandi terlalu lemah. Pakai minimal 12 karakter.";
     case "wrong_passphrase":
-      return "Frasa sandi salah, atau berkas cadangan telah diubah.";
+      return "Frasa sandi salah atau cadangan rusak.";
     case "not_a_backup":
       return "Berkas ini bukan cadangan Money Tracker.";
     case "unsupported_backup":
       return "Cadangan dibuat oleh versi aplikasi yang lebih baru. Perbarui aplikasi dulu.";
     case "backup_damaged":
-      return "Cadangan tidak lengkap atau rusak. Data Anda tidak diubah.";
+      return "Cadangan rusak (tidak lengkap atau telah diubah). Data Anda tidak diubah.";
     case "locked":
       return "Aplikasi terkunci. Buka kunci dulu.";
     default:

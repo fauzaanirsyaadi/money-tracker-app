@@ -10,7 +10,10 @@
 //! frames, each:  len u32 (big endian, ciphertext length) | ciphertext
 //! ```
 //!
-//! The key is Argon2id(passphrase, salt, params). Chunks use XChaCha20-Poly1305
+//! The key is Argon2id(NFKC(passphrase), salt, params). Format version 2 means
+//! the passphrase is Unicode-normalised (NFKC) first, so a passphrase typed
+//! with composed or decomposed accents, or with full-width letters, opens the
+//! same backup. Version 1 (raw bytes) was never released and is refused. Chunks use XChaCha20-Poly1305
 //! in the STREAM (BE32) construction, so reordering, dropping, duplicating or
 //! truncating chunks is detected, and the last chunk is marked as last.
 //! There is **no recovery** for a lost passphrase.
@@ -28,10 +31,12 @@ use chacha20poly1305::{
         stream::{DecryptorBE32, EncryptorBE32},
     },
 };
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 pub const MAGIC: [u8; 4] = *b"MTBK";
-pub const FORMAT_VERSION: u8 = 1;
+/// 2 = passphrase normalised with Unicode NFKC before key derivation.
+pub const FORMAT_VERSION: u8 = 2;
 const KDF_ARGON2ID: u8 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_PREFIX_LEN: usize = 19;
@@ -75,7 +80,7 @@ impl fmt::Display for BackupError {
             Self::NotABackup => "not a Money Tracker backup",
             Self::UnsupportedVersion(_) => "backup format version is not supported",
             Self::BadParameters => "backup parameters are out of range",
-            Self::WrongPassphraseOrCorrupt => "wrong passphrase or damaged backup",
+            Self::WrongPassphraseOrCorrupt => "wrong passphrase or corrupted backup",
             Self::Truncated => "backup is incomplete",
             Self::TrailingData => "unexpected data after the end of the backup",
             Self::Io => "could not read or write the backup",
@@ -125,8 +130,15 @@ impl fmt::Display for PassphraseProblem {
 
 impl std::error::Error for PassphraseProblem {}
 
-/// Checks a passphrase chosen for a new backup. Never echoes it.
+/// The form of the passphrase that is hashed and measured: NFKC.
+fn normalize(passphrase: &str) -> Zeroizing<String> {
+    Zeroizing::new(passphrase.nfkc().collect())
+}
+
+/// Checks a passphrase chosen for a new backup. Never echoes it. Length and
+/// repetition are judged on the normalised text, which is what gets hashed.
 pub fn validate_passphrase(passphrase: &str) -> Result<(), PassphraseProblem> {
+    let passphrase = normalize(passphrase);
     let chars = passphrase.chars().count();
     if chars < PASSPHRASE_MIN_CHARS {
         return Err(PassphraseProblem::TooShort);
@@ -180,6 +192,7 @@ impl KdfParams {
 type Key = Zeroizing<[u8; 32]>;
 
 fn derive_key(passphrase: &str, salt: &[u8], params: KdfParams) -> Result<Key, BackupError> {
+    let passphrase = normalize(passphrase);
     let argon = Params::new(params.m_kib, params.t, params.p, Some(32))
         .map_err(|_| BackupError::BadParameters)?;
     let mut key: Key = Zeroizing::new([0u8; 32]);
@@ -663,10 +676,10 @@ mod tests {
             Some(BackupError::NotABackup)
         );
         let mut file = seal(&sample(10), PASS);
-        file[4] = 2;
+        file[4] = 3;
         assert_eq!(
             BackupReader::open(&file[..], PASS).err(),
-            Some(BackupError::UnsupportedVersion(2))
+            Some(BackupError::UnsupportedVersion(3))
         );
     }
 
@@ -719,6 +732,56 @@ mod tests {
         assert_eq!(
             BackupError::from_io(&io::Error::other("x")),
             BackupError::Io
+        );
+    }
+
+    #[test]
+    fn composed_and_decomposed_accents_open_the_same_backup() {
+        let composed = "caf\u{e9} au lait pagi hari"; // é as one code point
+        let decomposed = "cafe\u{301} au lait pagi hari"; // e + combining acute
+        assert_ne!(
+            composed, decomposed,
+            "the test needs two different byte strings"
+        );
+        let file = seal(&sample(2000), composed);
+        assert_eq!(unseal(&file, decomposed).unwrap(), sample(2000));
+        let file = seal(&sample(2000), decomposed);
+        assert_eq!(unseal(&file, composed).unwrap(), sample(2000));
+    }
+
+    #[test]
+    fn compatibility_forms_fold_together() {
+        // Full-width Latin letters and the "fi" ligature normalise to plain text.
+        let plain = "financial secret phrase";
+        let odd = "\u{fb01}nancial secret phrase"; // ﬁ ligature
+        let wide = "ｆｉｎａｎｃｉａｌ secret phrase";
+        let file = seal(&sample(500), plain);
+        assert!(unseal(&file, odd).is_ok());
+        assert!(unseal(&file, wide).is_ok());
+        // ...while a genuinely different passphrase still fails.
+        assert!(unseal(&file, "financial secret phrasf").is_err());
+    }
+
+    #[test]
+    fn the_policy_counts_normalised_characters() {
+        // Twelve decomposed letters are twelve characters after NFKC, not twenty-four.
+        let decomposed = "e\u{301}".repeat(6) + &"a\u{301}".repeat(6);
+        assert_eq!(decomposed.chars().count(), 24);
+        assert_eq!(validate_passphrase(&decomposed), Ok(()));
+        // Eleven composed letters plus one more distinct one is fine; eleven is not.
+        assert_eq!(
+            validate_passphrase(&"\u{e9}a".repeat(5)),
+            Err(PassphraseProblem::TooShort)
+        );
+    }
+
+    #[test]
+    fn version_one_backups_are_refused() {
+        let mut file = seal(&sample(10), PASS);
+        file[4] = 1;
+        assert_eq!(
+            BackupReader::open(&file[..], PASS).err(),
+            Some(BackupError::UnsupportedVersion(1))
         );
     }
 

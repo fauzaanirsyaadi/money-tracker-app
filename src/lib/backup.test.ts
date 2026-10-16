@@ -16,6 +16,18 @@ test("a twelve character passphrase is accepted, counting characters not bytes",
   assert.equal(passphraseProblem("kopi susu gula aren enak"), null);
 });
 
+test("the policy counts the normalised form, like the backup does", () => {
+  // Twelve decomposed letters (24 code points) are twelve characters.
+  assert.equal(passphraseProblem("e\u0301".repeat(6) + "a\u0301".repeat(6)), null);
+  // Full-width letters fold to ASCII: this is still too short after folding.
+  assert.match(passphraseProblem("ＡＢＣ")!, /minimal 12/);
+});
+
+test("the first-chunk failure says it may be the passphrase or the file", () => {
+  assert.equal(backupErrorMessage("wrong_passphrase"), "Frasa sandi salah atau cadangan rusak.");
+  assert.match(backupErrorMessage("backup_damaged"), /^Cadangan rusak/);
+});
+
 test("file names carry the date", () => {
   assert.equal(backupFileName("2026-10-14"), "money-tracker-20261014.mtbak");
 });

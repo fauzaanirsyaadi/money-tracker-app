@@ -14,6 +14,9 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "stream"] }
 # OS random bytes for the salt and nonce prefix. ISC/MIT/Apache-2.0, rust-random (already in the tree).
 getrandom = "0.3"
+# NFKC for passphrases, so the same text typed on different keyboards derives the same key.
+# MIT OR Apache-2.0, unicode-rs, maintained.
+unicode-normalization = "0.1"
 # Wipes derived keys and passphrase copies. Apache-2.0 OR MIT, RustCrypto, maintained.
 zeroize = "1"
 
