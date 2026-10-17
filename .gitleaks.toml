@@ -1,0 +1,14 @@
+# gitleaks configuration (https://github.com/gitleaks/gitleaks). Default rules stay on;
+# only the two known false positives below are allowed, by their exact text.
+title = "Money Tracker"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test fixtures that only look like keys to the generic rule: a deliberately malformed Keystore alias name, and a fake account name used to prove error payloads carry no user data"
+targetRules = ["generic-api-key"]
+regexes = [
+  '''money_tracker_db_key_wrap_v-1''',
+  '''Rekening-Rahasia-12345''',
+]
