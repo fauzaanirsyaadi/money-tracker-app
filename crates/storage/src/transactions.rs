@@ -330,64 +330,7 @@ impl Db {
         limit: usize,
     ) -> Result<Page, StorageError> {
         let limit = limit.clamp(1, MAX_PAGE);
-        let mut clauses: Vec<&str> = Vec::new();
-        let mut args: Vec<Value> = Vec::new();
-
-        if let Some(account) = filter.account_id {
-            clauses.push("t.account_id = ?");
-            args.push(account.into());
-        }
-        if let Some(category) = filter.category_id {
-            clauses.push(
-                "(t.category_id = ? OR t.category_id IN
-                    (SELECT id FROM categories WHERE parent_id = ?))",
-            );
-            args.push(category.into());
-            args.push(category.into());
-        }
-        match filter.kind {
-            Some(KindFilter::Income) => clauses.push("t.kind = 'income'"),
-            Some(KindFilter::Expense) => clauses.push("t.kind = 'expense'"),
-            Some(KindFilter::Transfer) => clauses.push("t.kind IN ('transfer_out','transfer_in')"),
-            None => {}
-        }
-        if let Some(from) = filter.from {
-            clauses.push("t.occurred_on >= ?");
-            args.push(format_iso_date(from).into());
-        }
-        if let Some(to) = filter.to {
-            clauses.push("t.occurred_on <= ?");
-            args.push(format_iso_date(to).into());
-        }
-        if let Some(text) = filter
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            clauses.push("(t.note LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')");
-            let pattern = like_pattern(text);
-            args.push(pattern.clone().into());
-            args.push(pattern.into());
-        }
-        if let Some(cursor) = after {
-            clauses.push("(t.occurred_on < ? OR (t.occurred_on = ? AND t.id < ?))");
-            let date = format_iso_date(cursor.occurred_on);
-            args.push(date.clone().into());
-            args.push(date.into());
-            args.push(cursor.id.into());
-        }
-
-        let where_sql = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", clauses.join(" AND "))
-        };
-        // One extra row tells whether another page exists.
-        let sql = format!(
-            "{SELECT}{where_sql} ORDER BY t.occurred_on DESC, t.id DESC LIMIT {}",
-            limit + 1
-        );
+        let (sql, args) = page_query(filter, after, limit);
         let mut statement = self.conn().prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(args), read_raw)?;
         let mut items = rows
@@ -405,6 +348,74 @@ impl Db {
         };
         Ok(Page { items, next })
     }
+}
+
+/// The SQL and arguments of one page, separate from running it so that the query
+/// plan can be checked on exactly what runs (see `perf.rs`).
+pub(crate) fn page_query(
+    filter: &TransactionFilter,
+    after: Option<Cursor>,
+    limit: usize,
+) -> (String, Vec<Value>) {
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut args: Vec<Value> = Vec::new();
+
+    if let Some(account) = filter.account_id {
+        clauses.push("t.account_id = ?");
+        args.push(account.into());
+    }
+    if let Some(category) = filter.category_id {
+        clauses.push(
+            "(t.category_id = ? OR t.category_id IN
+                (SELECT id FROM categories WHERE parent_id = ?))",
+        );
+        args.push(category.into());
+        args.push(category.into());
+    }
+    match filter.kind {
+        Some(KindFilter::Income) => clauses.push("t.kind = 'income'"),
+        Some(KindFilter::Expense) => clauses.push("t.kind = 'expense'"),
+        Some(KindFilter::Transfer) => clauses.push("t.kind IN ('transfer_out','transfer_in')"),
+        None => {}
+    }
+    if let Some(from) = filter.from {
+        clauses.push("t.occurred_on >= ?");
+        args.push(format_iso_date(from).into());
+    }
+    if let Some(to) = filter.to {
+        clauses.push("t.occurred_on <= ?");
+        args.push(format_iso_date(to).into());
+    }
+    if let Some(text) = filter
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        clauses.push("(t.note LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')");
+        let pattern = like_pattern(text);
+        args.push(pattern.clone().into());
+        args.push(pattern.into());
+    }
+    if let Some(cursor) = after {
+        // A row value: the same as "earlier date, or the same date and a lower id",
+        // but SQLite turns it into a single index range instead of an OR.
+        clauses.push("(t.occurred_on, t.id) < (?, ?)");
+        args.push(format_iso_date(cursor.occurred_on).into());
+        args.push(cursor.id.into());
+    }
+
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    // One extra row tells whether another page exists.
+    let sql = format!(
+        "{SELECT}{where_sql} ORDER BY t.occurred_on DESC, t.id DESC LIMIT {}",
+        limit + 1
+    );
+    (sql, args)
 }
 
 const SELECT: &str = "

@@ -64,6 +64,25 @@ pub struct NetWorth {
     pub accounts: Vec<Account>,
 }
 
+// The report queries, as constants so that `EXPLAIN QUERY PLAN` is checked on
+// exactly the SQL that runs (see `perf.rs`).
+pub(crate) const SPENDING_SQL: &str =
+    "SELECT c.id, c.name, c.parent_id, p.name, SUM(-t.amount_minor), COUNT(*)
+             FROM transactions t
+             JOIN categories c ON c.id = t.category_id
+             LEFT JOIN categories p ON p.id = c.parent_id
+             WHERE t.kind = 'expense' AND t.occurred_on >= ?1 AND t.occurred_on <= ?2
+             GROUP BY c.id";
+pub(crate) const TREND_BEFORE_SQL: &str = "SELECT COALESCE((SELECT SUM(opening_balance_minor) FROM accounts), 0)
+                  + COALESCE((SELECT SUM(amount_minor) FROM transactions WHERE occurred_on < ?1), 0)";
+pub(crate) const TREND_SQL: &str = "SELECT substr(occurred_on, 1, 7),
+                    COALESCE(SUM(CASE WHEN kind = 'income'  THEN  amount_minor END), 0),
+                    COALESCE(SUM(CASE WHEN kind = 'expense' THEN -amount_minor END), 0),
+                    SUM(amount_minor)
+             FROM transactions
+             WHERE occurred_on >= ?1 AND occurred_on <= ?2
+             GROUP BY substr(occurred_on, 1, 7)";
+
 impl Db {
     /// Spending by category for `from..=to`, largest first. Sub-category
     /// spending rolls up into its parent, which also lists the children.
@@ -78,14 +97,7 @@ impl Db {
         let (from_text, to_text) = (format_iso_date(from), format_iso_date(to));
 
         // One row per leaf category that has spending in the period.
-        let mut statement = self.conn().prepare(
-            "SELECT c.id, c.name, c.parent_id, p.name, SUM(-t.amount_minor), COUNT(*)
-             FROM transactions t
-             JOIN categories c ON c.id = t.category_id
-             LEFT JOIN categories p ON p.id = c.parent_id
-             WHERE t.kind = 'expense' AND t.occurred_on >= ?1 AND t.occurred_on <= ?2
-             GROUP BY c.id",
-        )?;
+        let mut statement = self.conn().prepare(SPENDING_SQL)?;
         let rows = statement
             .query_map(params![from_text, to_text], |r| {
                 Ok((
@@ -206,21 +218,12 @@ impl Db {
         // Net worth just before the first month: every opening balance plus
         // everything dated earlier (transfers cancel out on their own).
         let before: i64 = self.conn().query_row(
-            "SELECT COALESCE((SELECT SUM(opening_balance_minor) FROM accounts), 0)
-                  + COALESCE((SELECT SUM(amount_minor) FROM transactions WHERE occurred_on < ?1), 0)",
+            TREND_BEFORE_SQL,
             params![format_iso_date(from.first_day())],
             |r| r.get(0),
         )?;
 
-        let mut statement = self.conn().prepare(
-            "SELECT substr(occurred_on, 1, 7),
-                    COALESCE(SUM(CASE WHEN kind = 'income'  THEN  amount_minor END), 0),
-                    COALESCE(SUM(CASE WHEN kind = 'expense' THEN -amount_minor END), 0),
-                    SUM(amount_minor)
-             FROM transactions
-             WHERE occurred_on >= ?1 AND occurred_on <= ?2
-             GROUP BY substr(occurred_on, 1, 7)",
-        )?;
+        let mut statement = self.conn().prepare(TREND_SQL)?;
         let rows = statement
             .query_map(
                 params![

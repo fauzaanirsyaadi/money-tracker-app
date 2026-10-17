@@ -8,6 +8,8 @@ mod budgets;
 mod categories;
 mod db;
 mod error;
+#[cfg(test)]
+mod perf;
 mod recurring;
 #[cfg(test)]
 mod redaction_tests;

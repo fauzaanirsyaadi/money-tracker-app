@@ -35,7 +35,7 @@ struct RawAccount {
     balance: i64,
 }
 
-const SELECT: &str = "
+pub(crate) const SELECT: &str = "
     SELECT a.id, a.name, a.kind, a.currency, a.opening_balance_minor, a.archived,
            a.sort_order, a.created_at,
            a.opening_balance_minor

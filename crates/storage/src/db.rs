@@ -12,6 +12,7 @@ use crate::error::StorageError;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_categories.sql"),
+    include_str!("../migrations/0003_balance_index.sql"),
 ];
 
 /// Raw 256-bit SQLCipher key. Generated and wrapped by the platform layer.
