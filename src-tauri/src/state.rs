@@ -86,8 +86,11 @@ impl AppState {
     }
 
     /// Records that the PIN was just confirmed for guarded actions.
-    pub fn grant_step_up(&self, now: Instant) {
-        let generation = self.lock.lock_generation();
+    ///
+    /// `generation` is the lock generation read **before** the PIN was checked:
+    /// if the lock engaged while the check ran, the confirmation belongs to a
+    /// lock that no longer exists and is born stale.
+    pub fn grant_step_up(&self, now: Instant, generation: u64) {
         *self.step_up.lock().unwrap_or_else(PoisonError::into_inner) = Some((now, generation));
     }
 

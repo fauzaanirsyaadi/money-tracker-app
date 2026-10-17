@@ -334,10 +334,12 @@ pub async fn lock_step_up(
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         let now = Instant::now();
+        // The generation the PIN is submitted under, read before the (slow) check.
+        let generation = state.applock().lock_generation();
         if pin_required(&state) {
             state.applock().verify_pin(&pin, now)?;
         }
-        state.grant_step_up(now);
+        state.grant_step_up(now, generation);
         Ok(())
     })
     .await?;
@@ -477,10 +479,11 @@ mod tests {
 
     /// What `lock_step_up` does, without the Tauri plumbing around it.
     fn step_up(state: &AppState, attempt: &str, now: Instant) -> Result<(), AppError> {
+        let generation = state.applock().lock_generation();
         if pin_required(state) {
             state.applock().verify_pin(&pin(attempt), now)?;
         }
-        state.grant_step_up(now);
+        state.grant_step_up(now, generation);
         Ok(())
     }
 
@@ -571,6 +574,26 @@ mod tests {
             require_step_up(&state, now).unwrap_err().code,
             ErrorCode::PinRequired,
             "a confirmation made before a lock must not count after it"
+        );
+    }
+
+    #[test]
+    fn a_lock_that_engages_while_the_pin_is_being_checked_leaves_a_stale_step_up() {
+        let dir = Dir::new("born-stale");
+        let state = state_with_lock(&dir, true);
+        state.applock().mark_unlocked();
+        let now = Instant::now();
+        // The PIN is submitted under this generation...
+        let submitted_under = state.applock().lock_generation();
+        state.applock().verify_pin(&pin(PIN), now).unwrap();
+        // ...the lock engages during the check, and the next unlock is by someone else.
+        state.applock().lock_now();
+        state.applock().mark_unlocked();
+        state.grant_step_up(now, submitted_under);
+        assert_eq!(
+            require_step_up(&state, now).unwrap_err().code,
+            ErrorCode::PinRequired,
+            "a PIN given before the lock must not authorise anything after it"
         );
     }
 
