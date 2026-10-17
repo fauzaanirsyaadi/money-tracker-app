@@ -193,7 +193,7 @@ mod tests {
     use mt_core::{
         AccountDraft, AccountKind, Currency, FlowKind, Money, TransactionDraft, TransferDraft,
     };
-    use zeroize::Zeroizing;
+    use mt_storage::DbKey;
 
     use super::*;
     use crate::error::ErrorCode;
@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn setup() -> (Db, i64, i64, i64) {
-        let mut db = Db::open_in_memory(&Zeroizing::new([13u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([13u8; 32])).unwrap();
         let cash = db
             .create_account(
                 &AccountDraft::new("Tunai", AccountKind::Cash, idr(500_000)).unwrap(),

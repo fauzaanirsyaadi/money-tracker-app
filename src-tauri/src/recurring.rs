@@ -268,7 +268,7 @@ mt_core::redacted_debug!(RecurringDto, RecurringInput, RecurringEditInput);
 #[cfg(test)]
 mod tests {
     use mt_core::{AccountDraft, AccountKind, Currency};
-    use zeroize::Zeroizing;
+    use mt_storage::DbKey;
 
     use super::*;
     use crate::error::ErrorCode;
@@ -277,7 +277,7 @@ mod tests {
     const NOW: i64 = 1_791_979_200;
 
     fn setup() -> (Db, i64, i64) {
-        let mut db = Db::open_in_memory(&Zeroizing::new([9u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([9u8; 32])).unwrap();
         let account = db
             .create_account(
                 &AccountDraft::new(

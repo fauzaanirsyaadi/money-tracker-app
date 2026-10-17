@@ -22,6 +22,7 @@ const OLD_SUFFIX: &str = ".old";
 /// Files that make up one SQLite database.
 const COMPANIONS: [&str; 3] = ["", "-wal", "-shm"];
 
+// debug-safe: WeakPassphrase carries a PassphraseProblem category, never the passphrase
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupFailure {
     /// The passphrase is not acceptable for a new backup.
@@ -401,8 +402,6 @@ mod tests {
         time::Instant,
     };
 
-    use zeroize::Zeroizing;
-
     use super::*;
 
     const PASS: &str = "gantungkan cita-cita setinggi langit";
@@ -433,7 +432,7 @@ mod tests {
     }
 
     fn key(byte: u8) -> DbKey {
-        Zeroizing::new([byte; 32])
+        DbKey::new([byte; 32])
     }
 
     /// A deterministic logical dump with `n` transactions, built as text so the
@@ -768,7 +767,7 @@ mod tests {
         let blob = fs::read(dir.file("db.key")).ok()?;
         let plain: Vec<u8> = blob.iter().map(|b| b ^ 0x5a).collect();
         let bytes: [u8; 32] = plain.try_into().ok()?;
-        let db = Db::open(&dir.file(LIVE_DB), &Zeroizing::new(bytes)).ok()?;
+        let db = Db::open(&dir.file(LIVE_DB), &DbKey::new(bytes)).ok()?;
         db.accounts(true).ok()?.first().map(|a| a.balance.minor())
     }
 

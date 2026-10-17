@@ -34,6 +34,7 @@ const FORMAT: u32 = 1;
 /// backup file does not lock the user out of their own export.
 pub const EXTERNAL_UI_MAX: Duration = Duration::from_secs(120);
 
+// debug-safe: InvalidPin carries a PinProblem category (too short, not digits), never the PIN
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockError {
     /// No PIN has been set.

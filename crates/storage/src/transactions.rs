@@ -473,8 +473,8 @@ mt_core::redacted_debug!(TransactionRecord, TransactionFilter);
 
 #[cfg(test)]
 mod tests {
+    use crate::DbKey;
     use mt_core::{AccountDraft, AccountKind};
-    use zeroize::Zeroizing;
 
     use super::*;
 
@@ -497,7 +497,7 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        let mut db = Db::open_in_memory(&Zeroizing::new([8u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([8u8; 32])).unwrap();
         let account = |db: &mut Db, name: &str, kind| {
             db.create_account(&AccountDraft::new(name, kind, idr(0)).unwrap(), 0)
                 .unwrap()

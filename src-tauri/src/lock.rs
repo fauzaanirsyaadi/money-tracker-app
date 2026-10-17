@@ -160,8 +160,10 @@ pub async fn lock_status(app: AppHandle) -> Result<LockStatusDto, AppError> {
 }
 
 #[tauri::command]
-pub async fn lock_unlock_pin(app: AppHandle, pin: String) -> Result<LockStatusDto, AppError> {
-    let pin = Zeroizing::new(pin);
+pub async fn lock_unlock_pin(
+    app: AppHandle,
+    pin: Zeroizing<String>,
+) -> Result<LockStatusDto, AppError> {
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         state.applock().verify_pin(&pin, Instant::now())?;
@@ -199,8 +201,7 @@ pub async fn lock_unlock_biometric(app: AppHandle) -> Result<LockStatusDto, AppE
 
 /// Sets the first PIN. Needs the app to be unlocked (it always is when none exists).
 #[tauri::command]
-pub async fn lock_setup(app: AppHandle, pin: String) -> Result<LockStatusDto, AppError> {
-    let pin = Zeroizing::new(pin);
+pub async fn lock_setup(app: AppHandle, pin: Zeroizing<String>) -> Result<LockStatusDto, AppError> {
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         require_unlocked(&state)?;
@@ -213,10 +214,9 @@ pub async fn lock_setup(app: AppHandle, pin: String) -> Result<LockStatusDto, Ap
 #[tauri::command]
 pub async fn lock_change_pin(
     app: AppHandle,
-    current: String,
-    new: String,
+    current: Zeroizing<String>,
+    new: Zeroizing<String>,
 ) -> Result<LockStatusDto, AppError> {
-    let (current, new) = (Zeroizing::new(current), Zeroizing::new(new));
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         require_unlocked(&state)?;
@@ -228,8 +228,10 @@ pub async fn lock_change_pin(
 
 /// Turns the lock off after confirming the PIN.
 #[tauri::command]
-pub async fn lock_remove(app: AppHandle, current: String) -> Result<LockStatusDto, AppError> {
-    let current = Zeroizing::new(current);
+pub async fn lock_remove(
+    app: AppHandle,
+    current: Zeroizing<String>,
+) -> Result<LockStatusDto, AppError> {
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         require_unlocked(&state)?;

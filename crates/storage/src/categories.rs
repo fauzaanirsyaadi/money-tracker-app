@@ -82,12 +82,12 @@ mt_core::redacted_debug!(Category);
 
 #[cfg(test)]
 mod tests {
-    use zeroize::Zeroizing;
+    use crate::DbKey;
 
     use super::*;
 
     fn db() -> Db {
-        Db::open_in_memory(&Zeroizing::new([6u8; 32])).unwrap()
+        Db::open_in_memory(&DbKey::new([6u8; 32])).unwrap()
     }
 
     fn draft(name: &str, kind: FlowKind, parent: Option<i64>) -> CategoryDraft {

@@ -3,7 +3,8 @@
 
     check_debug_redaction.py [repo_root]
 
-A derived `Debug` prints every field, so a stray `{:?}` or a failed assertion in
+Also checked: `#[cfg_attr(..., derive(Debug))]` and hand-written `impl Debug`
+(which must say it redacts). A derived `Debug` prints every field, so a stray `{:?}` or a failed assertion in
 a log could leak a balance or a note. Such types use `mt_core::redacted_debug!`
 (or a hand-written `Debug`) instead. A type that merely *looks* sensitive can be
 exempted with a `// debug-safe: <reason>` comment on one of the three lines
@@ -17,6 +18,13 @@ import sys
 from pathlib import Path
 
 SKIP_DIRS = {"target", "node_modules", ".git", "build", "gen", "tests"}
+
+# Whole words (snake_case and camelCase are split) that mark secret material.
+SENSITIVE_WORDS = {
+    "key", "keys", "pin", "hash", "blob", "salt", "token", "secret", "passphrase",
+    "password", "passwd", "nonce",
+}
+SENSITIVE_TYPES = re.compile(r"\b(DbKey|Zeroizing|SecretKey|SecretString)\b")
 
 SENSITIVE_FIELD = re.compile(
     r"\b(amount\w*|\w*_minor|balance\w*|limit\w*|opening\w*|note|notes|name|spent\w*|"
@@ -68,10 +76,45 @@ def payloads(enum_body: str) -> str:
     return " ".join(found)
 
 
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CAMEL = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+
+
+def words_of(identifier: str) -> set[str]:
+    """`pin_hash` -> {pin, hash}; `wrappedKey` -> {wrapped, key}."""
+    found: set[str] = set()
+    for part in identifier.split("_"):
+        found.update(word.lower() for word in CAMEL.findall(part))
+    return found
+
+
+def is_sensitive(body: str) -> bool:
+    if SENSITIVE_FIELD.search(body) or SENSITIVE_TYPES.search(body):
+        return True
+    return any(words_of(name) & SENSITIVE_WORDS for name in IDENTIFIER.findall(body))
+
+
+CFG_ATTR_DERIVE = re.compile(r"#\[cfg_attr\((?:[^\]]*?)derive\(([^)]*)\)[^\]]*\)\]")
+MANUAL_DEBUG = re.compile(
+    r"impl(?:<[^>]*>)?\s+(?:::?)?(?:(?:std|core)::)?(?:fmt::)?Debug\s+for\s+(\w+)"
+)
+DEFINITION = r"(?:pub(?:\([a-z]+\))?\s+)?(?:struct|enum)\s+{name}\b"
+
+
+def type_body(text: str, name: str) -> str | None:
+    match = re.search(DEFINITION.format(name=re.escape(name)), text)
+    if not match:
+        return None
+    body = strip_comments(body_after(text, match.end()))
+    # An enum is judged by what its variants carry.
+    return payloads(body) if "enum" in match.group(0) and body else body
+
+
 def check_text(text: str, label: str) -> list[str]:
     problems: list[str] = []
     lines = text.split("\n")
-    for match in DERIVE.finditer(text):
+    derive_matches = list(DERIVE.finditer(text)) + list(CFG_ATTR_DERIVE.finditer(text))
+    for match in derive_matches:
         derives = [d.strip() for d in match.group(1).split(",")]
         if "Debug" not in derives:
             continue
@@ -85,11 +128,27 @@ def check_text(text: str, label: str) -> list[str]:
         body = strip_comments(body_after(text, item.end()))
         if item.group(1) == "enum":
             body = payloads(body) if body else ""
-        if SENSITIVE_FIELD.search(body):
+        if is_sensitive(body):
             problems.append(
                 f"DEBUG-REDACTION FAIL: {label}:{line_no + 1}: `{item.group(2)}` derives Debug "
                 "but has fields that may hold money, names or notes; use mt_core::redacted_debug! "
                 "or add `// debug-safe: <reason>`"
+            )
+    # Hand-written Debug on a type with sensitive fields must say it redacts.
+    for impl in MANUAL_DEBUG.finditer(text):
+        name = impl.group(1)
+        line_no = text.count("\n", 0, impl.start())
+        context = "\n".join(lines[max(0, line_no - 3) : line_no + 1])
+        if "debug-safe" in context:
+            continue
+        fields = type_body(text, name)
+        if fields is None or not is_sensitive(fields):
+            continue
+        body = body_after(text, impl.end())
+        if "redacted" not in body.lower():
+            problems.append(
+                f"DEBUG-REDACTION FAIL: {label}:{line_no + 1}: hand-written Debug for `{name}` "
+                "prints a type with sensitive fields and does not redact them"
             )
     return problems
 

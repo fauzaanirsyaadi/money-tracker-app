@@ -129,12 +129,11 @@ pub async fn recovery_retry(app: AppHandle) -> Result<LockStatusDto, AppError> {
 pub async fn recovery_authenticate(
     app: AppHandle,
     state: State<'_, AppState>,
-    pin: String,
+    pin: Zeroizing<String>,
 ) -> Result<LockStatusDto, AppError> {
     if !state.recovering() {
         return Err(AppError::invalid("there is nothing to recover"));
     }
-    let pin = Zeroizing::new(pin);
     let worker = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), AppError> {
         let state = worker.state::<AppState>();

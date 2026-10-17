@@ -127,11 +127,11 @@ mt_core::redacted_debug!(BudgetRecord);
 
 #[cfg(test)]
 mod tests {
+    use crate::DbKey;
     use mt_core::{
         AccountDraft, AccountKind, BudgetStatus, CategoryDraft, TransactionDraft, TransferDraft,
         parse_iso_date,
     };
-    use zeroize::Zeroizing;
 
     use super::*;
 
@@ -154,7 +154,7 @@ mod tests {
     }
 
     fn fx() -> Fx {
-        let mut db = Db::open_in_memory(&Zeroizing::new([7u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([7u8; 32])).unwrap();
         let mut account = |name: &str, kind| {
             db.create_account(&AccountDraft::new(name, kind, idr(0)).unwrap(), 0)
                 .unwrap()

@@ -379,8 +379,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use zeroize::Zeroizing;
-
     use super::*;
 
     struct TempDir(PathBuf);
@@ -405,7 +403,7 @@ mod tests {
     }
 
     fn key(byte: u8) -> DbKey {
-        Zeroizing::new([byte; 32])
+        DbKey::new([byte; 32])
     }
 
     /// A database with every kind of row: custom categories (one a child of

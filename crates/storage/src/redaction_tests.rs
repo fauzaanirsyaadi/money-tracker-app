@@ -1,11 +1,11 @@
 //! A stray `{:?}` on anything read back from the database must never print an
 //! amount, a name or a note (review item L1).
 
+use crate::DbKey;
 use mt_core::{
     AccountDraft, AccountKind, BudgetDraft, CategoryDraft, Currency, FlowKind, Money,
     TransactionDraft, TransferDraft, YearMonth, parse_iso_date,
 };
-use zeroize::Zeroizing;
 
 use crate::{Db, TransactionFilter};
 
@@ -25,7 +25,7 @@ fn clean(label: &str, text: &str) {
 
 #[test]
 fn records_read_from_the_database_never_print_their_contents() {
-    let mut db = Db::open_in_memory(&Zeroizing::new([3u8; 32])).unwrap();
+    let mut db = Db::open_in_memory(&DbKey::new([3u8; 32])).unwrap();
     let date = parse_iso_date("2026-10-14").unwrap();
 
     let a = db

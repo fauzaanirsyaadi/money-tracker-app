@@ -30,10 +30,12 @@ serde_json = "1"
 # OS random bytes for the database key. Already in the tree via tauri; MIT OR Apache-2.0, rust-random.
 getrandom = "0.3"
 # Wipes key material from memory. Apache-2.0 OR MIT, RustCrypto, maintained.
-zeroize = "1"
+# `serde` lets commands receive PIN and passphrase directly as `Zeroizing<String>`,
+# so no un-wiped copy is made on the way in.
+zeroize = { version = "1", features = ["serde"] }
 # Hashes the app-lock PIN (Argon2id, memory-hard). MIT OR Apache-2.0, RustCrypto, maintained.
 # Pure Rust; no_std-capable, so it adds only blake2, base64ct, password-hash and subtle.
-argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
 
 [lints]
 workspace = true

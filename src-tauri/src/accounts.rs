@@ -149,13 +149,13 @@ mt_core::redacted_debug!(AccountDto, AccountInput);
 
 #[cfg(test)]
 mod tests {
-    use zeroize::Zeroizing;
+    use mt_storage::DbKey;
 
     use super::*;
     use crate::error::ErrorCode;
 
     fn db() -> Db {
-        Db::open_in_memory(&Zeroizing::new([2u8; 32])).unwrap()
+        Db::open_in_memory(&DbKey::new([2u8; 32])).unwrap()
     }
 
     fn input(name: &str, kind: &str, opening: &str) -> AccountInput {

@@ -363,7 +363,7 @@ mt_core::redacted_debug!(
 #[cfg(test)]
 mod tests {
     use mt_core::AccountKind;
-    use zeroize::Zeroizing;
+    use mt_storage::DbKey;
 
     use super::*;
     use crate::{accounts, error::ErrorCode};
@@ -382,7 +382,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        let mut db = Db::open_in_memory(&Zeroizing::new([3u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([3u8; 32])).unwrap();
         let account = |db: &mut Db, name: &str, kind: &str| {
             accounts::create(
                 db,

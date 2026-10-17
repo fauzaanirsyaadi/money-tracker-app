@@ -21,7 +21,7 @@ use std::{
 use mt_storage::{Db, DbKey, StorageError};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_mt_keystore::MtKeystoreExt;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     applock::LOCK_FILE,
@@ -88,6 +88,7 @@ impl From<tauri_plugin_mt_keystore::Error> for VaultError {
 }
 
 /// What exists in the data directory.
+// debug-safe: `key` is a bool: whether db.key exists
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirState {
     /// `money.db` exists and is not empty (or an interrupted restore left
@@ -236,7 +237,7 @@ fn pair_probe(dir: &Path, unwrap: &impl Fn(&[u8]) -> Result<Vec<u8>, VaultError>
     let Ok(bytes) = <[u8; 32]>::try_from(plain.as_slice()) else {
         return Probe::Corrupt;
     };
-    probe_of_open(Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes)).map(drop))
+    probe_of_open(Db::open(&dir.join(DB_FILE), &DbKey::new(bytes)).map(drop))
 }
 
 fn probe_of_open(result: Result<(), StorageError>) -> Probe {
@@ -314,17 +315,16 @@ fn load_key(
                 .as_slice()
                 .try_into()
                 .map_err(|_| VaultError::Recovery(RecoveryReason::KeyUnusable))?;
-            Ok(Zeroizing::new(bytes))
+            Ok(DbKey::new(bytes))
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             if !allow_create {
                 return Err(VaultError::Recovery(RecoveryReason::KeyMissing));
             }
-            let mut bytes = Zeroizing::new([0u8; 32]);
-            getrandom::fill(bytes.as_mut_slice()).map_err(|_| VaultError::Io)?;
-            let blob = wrap(bytes.as_slice())?;
+            let key = random_key()?;
+            let blob = wrap(key.as_slice())?;
             write_key_file(dir, &blob)?;
-            Ok(bytes)
+            Ok(key)
         }
         Err(_) => Err(VaultError::Io),
     }
@@ -354,7 +354,7 @@ pub fn open_current_pair<R: Runtime>(app: &AppHandle<R>) -> Result<Db, VaultErro
         .as_slice()
         .try_into()
         .map_err(|_| VaultError::Recovery(RecoveryReason::KeyUnusable))?;
-    Ok(Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes))?)
+    Ok(Db::open(&dir.join(DB_FILE), &DbKey::new(bytes))?)
 }
 
 /// The Keystore operations that replacing the data needs. Behind a trait so the
@@ -500,9 +500,17 @@ pub fn prune_stale_aliases(dir: &Path, keys: &dyn KeyBackend) {
 
 /// A fresh random database key, for a restore that replaces unreadable data.
 pub fn fresh_key() -> Result<DbKey, VaultError> {
-    let mut bytes = Zeroizing::new([0u8; 32]);
-    getrandom::fill(bytes.as_mut_slice()).map_err(|_| VaultError::Io)?;
-    Ok(bytes)
+    random_key()
+}
+
+/// 32 random bytes from the OS, wiped from the stack buffer once moved into the key.
+fn random_key() -> Result<DbKey, VaultError> {
+    let mut bytes = [0u8; 32];
+    let filled = getrandom::fill(&mut bytes);
+    let key = DbKey::new(bytes);
+    bytes.zeroize();
+    filled.map_err(|_| VaultError::Io)?;
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -547,7 +555,7 @@ mod tests {
     const KEY: [u8; 32] = [7; 32];
 
     fn key_of(bytes: [u8; 32]) -> DbKey {
-        Zeroizing::new(bytes)
+        DbKey::new(bytes)
     }
 
     fn load(dir: &Path, allow_create: bool) -> Result<DbKey, VaultError> {
@@ -1232,7 +1240,7 @@ mod tests {
             let Ok(bytes) = <[u8; 32]>::try_from(plain.as_slice()) else {
                 return false;
             };
-            Db::open(&dir.join(DB_FILE), &Zeroizing::new(bytes)).is_ok()
+            Db::open(&dir.join(DB_FILE), &DbKey::new(bytes)).is_ok()
         }
     }
 

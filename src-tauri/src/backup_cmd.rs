@@ -181,11 +181,10 @@ fn random_suffix() -> Result<String, AppError> {
 pub async fn backup_export(
     app: AppHandle,
     state: State<'_, AppState>,
-    passphrase: String,
+    passphrase: Zeroizing<String>,
     name: String,
 ) -> Result<ExportDto, AppError> {
     require_unlocked(&state)?;
-    let passphrase = Zeroizing::new(passphrase);
     mt_backup::validate_passphrase(&passphrase)
         .map_err(|problem| AppError::from(BackupFailure::WeakPassphrase(problem)))?;
 
@@ -268,11 +267,10 @@ pub async fn backup_restore_pick(
 pub async fn backup_restore_prepare(
     app: AppHandle,
     state: State<'_, AppState>,
-    passphrase: String,
+    passphrase: Zeroizing<String>,
 ) -> Result<RestorePreviewDto, AppError> {
     require_unlocked_or_recovering(&state)?;
     let recovering = state.recovering();
-    let passphrase = Zeroizing::new(passphrase);
     let picked = state
         .restore_session(|s| s.picked.clone())
         .ok_or_else(|| AppError::invalid("no backup file has been chosen"))?;

@@ -110,13 +110,13 @@ mod tests {
     use mt_core::{
         AccountDraft, AccountKind, Currency, FlowKind, TransactionDraft, parse_iso_date,
     };
-    use zeroize::Zeroizing;
+    use mt_storage::DbKey;
 
     use super::*;
     use crate::error::ErrorCode;
 
     fn setup() -> (Db, i64, i64, i64) {
-        let mut db = Db::open_in_memory(&Zeroizing::new([1u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([1u8; 32])).unwrap();
         let idr = |m| Money::from_minor(m, Currency::IDR).unwrap();
         let account = db
             .create_account(

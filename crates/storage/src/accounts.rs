@@ -176,13 +176,13 @@ mt_core::redacted_debug!(Account);
 
 #[cfg(test)]
 mod tests {
+    use crate::DbKey;
     use mt_core::MAX_MINOR;
-    use zeroize::Zeroizing;
 
     use super::*;
 
     fn db() -> Db {
-        let db = Db::open_in_memory(&Zeroizing::new([4u8; 32])).unwrap();
+        let db = Db::open_in_memory(&DbKey::new([4u8; 32])).unwrap();
         db.conn()
             .execute_batch("INSERT INTO categories(name,kind) VALUES('Food','expense');")
             .unwrap();

@@ -15,7 +15,38 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 /// Raw 256-bit SQLCipher key. Generated and wrapped by the platform layer.
-pub type DbKey = Zeroizing<[u8; 32]>;
+///
+/// A newtype rather than `Zeroizing<[u8; 32]>` on its own because the library
+/// type prints its bytes with `{:?}`. This one prints `DbKey(<redacted>)`, is
+/// wiped on drop, and offers no `Display`.
+#[derive(Clone)]
+pub struct DbKey(Zeroizing<[u8; 32]>);
+
+impl DbKey {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+}
+
+impl std::ops::Deref for DbKey {
+    type Target = [u8; 32];
+
+    fn deref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for DbKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DbKey(<redacted>)")
+    }
+}
+
+impl From<[u8; 32]> for DbKey {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self::new(bytes)
+    }
+}
 
 /// An open, unlocked, migrated database.
 pub struct Db {
@@ -198,7 +229,7 @@ mod tests {
     }
 
     fn key(byte: u8) -> DbKey {
-        Zeroizing::new([byte; 32])
+        DbKey::new([byte; 32])
     }
 
     fn sql(db: &Db, statement: &str) -> Result<usize, StorageError> {
@@ -678,5 +709,28 @@ mod tests {
         assert_eq!(version, 1, "the failed step must not advance the version");
         let in_txn = !conn.is_autocommit();
         assert!(!in_txn, "no transaction may be left open");
+    }
+
+    #[test]
+    fn a_key_never_prints_its_bytes() {
+        let key = DbKey::new([0x5a; 32]);
+        let shown = [
+            format!("{key:?}"),
+            format!("{key:#?}"),
+            format!("{:?}", Some(&key)),
+            format!("{:?}", vec![key.clone()]),
+            format!("{:?}", Ok::<_, ()>(key.clone())),
+        ];
+        for text in shown {
+            assert!(text.contains("<redacted>"), "{text}");
+            for leak in ["90", "5a", "5A", "0x5a", "[90"] {
+                assert!(!text.contains(leak), "{text} leaked {leak}");
+            }
+        }
+        // It still works as a key: the bytes are reachable on purpose, not by printing.
+        assert_eq!(key.len(), 32);
+        assert!(key.iter().all(|b| *b == 0x5a));
+        // ... and a copy of it does not share a printable form either.
+        assert_eq!(format!("{:?}", key.clone()), "DbKey(<redacted>)");
     }
 }

@@ -80,6 +80,13 @@ Kode Kotlin tidak tercakup aturan Rust dan masuk `/security-review` (langkah akh
 
 Dokumen build semula memakai `tauri-plugin-biometric`. Plugin resmi itu mengekspos perintah ke JS dan hasilnya kembali lewat JS, sehingga skrip di WebView dapat melaporkan "berhasil" tanpa prompt. Di sini hasil prompt dibuat di kode native dan langsung dikirim ke Rust (`lock_unlock_biometric` hanya *meminta* prompt); plugin kita tidak mendaftarkan perintah JS. **Jangan menggantinya dengan plugin resmi tanpa meninjau ulang jalur ini.**
 
+## Penanganan rahasia di memori dan keluaran
+
+- `DbKey` adalah newtype dengan `Debug` tersamar (`DbKey(<redacted>)`), dibungkus `Zeroizing`, tanpa `Display`. Penjaga CI (`check_debug_redaction.py`) menolak `derive(Debug)` baru (termasuk lewat `cfg_attr`) dan `impl Debug` manual yang tidak menyamarkan pada tipe yang berisi kata `key`, `pin`, `hash`, `blob`, `salt`, `token`, `secret`, `passphrase`, `password`, `nonce`, atau tipe `DbKey`/`Zeroizing`.
+- PIN dan frasa sandi diterima perintah langsung sebagai `Zeroizing<String>` (fitur `serde` pada `zeroize`), sehingga tidak ada salinan `String` biasa yang dibuat saat deserialisasi.
+- Argon2 memakai fitur `zeroize` (blok memori kerja dihapus). `chacha20poly1305` menghapus kunci dan state sendiri saat di-drop (`ZeroizeOnDrop`).
+- Tidak terjangkau: salinan di WebView, di buffer JSON IPC, dan heks kunci yang melintasi jembatan JNI (L4).
+
 ## Batas yang diketahui
 
 - **Keystore di emulator** berlevel `software`. Level `tee`/`strongbox` belum diverifikasi pada perangkat nyata.

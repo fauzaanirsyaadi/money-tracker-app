@@ -400,7 +400,7 @@ mt_core::redacted_debug!(RecurringRecord);
 
 #[cfg(test)]
 mod tests {
-    use zeroize::Zeroizing;
+    use crate::DbKey;
 
     use super::*;
 
@@ -409,7 +409,7 @@ mod tests {
     }
 
     fn db() -> Db {
-        let db = Db::open_in_memory(&Zeroizing::new([9u8; 32])).unwrap();
+        let db = Db::open_in_memory(&DbKey::new([9u8; 32])).unwrap();
         db.conn()
             .execute_batch(
                 "INSERT INTO accounts(name,kind,currency,created_at) VALUES('Cash','cash','IDR',0);
@@ -622,7 +622,8 @@ mod tests {
 #[cfg(test)]
 mod crud_tests {
     use mt_core::{AccountDraft, AccountKind, CategoryDraft};
-    use zeroize::Zeroizing;
+
+    use crate::DbKey;
 
     use super::*;
 
@@ -644,7 +645,7 @@ mod crud_tests {
     }
 
     fn fx() -> Fx {
-        let mut db = Db::open_in_memory(&Zeroizing::new([5u8; 32])).unwrap();
+        let mut db = Db::open_in_memory(&DbKey::new([5u8; 32])).unwrap();
         let mut account = |name: &str, kind| {
             db.create_account(&AccountDraft::new(name, kind, idr(0)).unwrap(), 0)
                 .unwrap()

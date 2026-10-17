@@ -2,6 +2,7 @@
 //! a name or a note (review item L1).
 
 use mt_core::{AccountDraft, AccountKind, Currency, Money};
+use mt_storage::DbKey;
 use serde_json::json;
 use zeroize::Zeroizing;
 
@@ -60,7 +61,7 @@ fn command_inputs_never_print_their_contents() {
 
 #[test]
 fn command_outputs_never_print_their_contents() {
-    let mut db = mt_storage::Db::open_in_memory(&Zeroizing::new([5u8; 32])).unwrap();
+    let mut db = mt_storage::Db::open_in_memory(&DbKey::new([5u8; 32])).unwrap();
     let id = db
         .create_account(
             &AccountDraft::new(
@@ -76,4 +77,15 @@ fn command_outputs_never_print_their_contents() {
     let dto = AccountDto::from(&account);
     clean("Account", &format!("{account:?}"));
     clean("AccountDto", &format!("{dto:?}"));
+}
+
+#[test]
+fn secrets_arrive_from_the_webview_directly_as_zeroizing_strings() {
+    // Commands take `Zeroizing<String>` for the PIN and the passphrase, so no
+    // un-wiped `String` copy is made while deserialising them.
+    let pin: Zeroizing<String> = serde_json::from_str("\"493017\"").unwrap();
+    assert_eq!(pin.as_str(), "493017");
+    let args: serde_json::Value = serde_json::json!({ "current": "493017", "new": "718204" });
+    let current: Zeroizing<String> = serde_json::from_value(args["current"].clone()).unwrap();
+    assert_eq!(current.as_str(), "493017");
 }
