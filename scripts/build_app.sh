@@ -6,20 +6,26 @@
 #   --debug         debug build instead of release (inspectable WebView, bigger, slower)
 #   --skip-checks   skip the validation gate (fmt, clippy, tests, guards)
 #   --install       install the result on the device adb sees (adb install -r)
+#   --allow-debug-key  let --install put a debug-signed APK on a REAL phone (see below)
 #   --out DIR       where to put the APK (default: target/release-apk)
 #   -h, --help      this text
 #
 # Signing
 #   Default: signed with the Android *debug* key, so the file installs on a phone but
 #   is labelled TEST-SIGNED. The debug key is public: never distribute that file.
-#   Release signing: set the path of YOUR keystore and its key alias; the passwords are
-#   read from the environment or asked for, never stored or put on a command line:
+#   The debug key is the same on every machine, so anyone can build an APK that Android
+#   accepts as an UPDATE of an app signed with it (and that then reads its private data).
+#   For that reason --install refuses to put a debug-signed APK on a real phone unless
+#   you also pass --allow-debug-key (an emulator is always fine).
+#
+#   Release signing: set the path of YOUR keystore and its key alias. The passwords are
+#   asked for just before signing, or taken from MT_KS_PASS / MT_KEY_PASS, and are given
+#   to apksigner alone (never exported to the build, never on a command line). Do not
+#   `export` them in your shell profile: pass them inline for one run:
 #
 #     export MT_KEYSTORE=/path/outside/the/repo/money-tracker.jks
 #     export MT_KEY_ALIAS=money-tracker
-#     export MT_KS_PASS=...        # optional: asked for when missing
-#     export MT_KEY_PASS=...       # optional: defaults to the keystore password
-#     scripts/build_app.sh
+#     MT_KS_PASS=... scripts/build_app.sh      # or leave it out to be asked
 #
 #   A release keystore is created once, by you, outside the repository:
 #     keytool -genkeypair -v -keystore money-tracker.jks -alias money-tracker \
@@ -31,12 +37,21 @@
 
 set -euo pipefail
 
+start_dir="$PWD"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+
+# The signing passwords are taken out of the environment at once, so that nothing the
+# build runs (pnpm, cargo build scripts, Gradle and its long-lived daemon) can inherit
+# them. They are handed to apksigner, and only to it, at the end.
+ks_pass="${MT_KS_PASS-}"
+key_pass="${MT_KEY_PASS-}"
+unset MT_KS_PASS MT_KEY_PASS
 
 profile=release
 run_checks=1
 do_install=0
+allow_debug_key=0
 out="$root/target/release-apk"
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
@@ -48,6 +63,7 @@ while [ $# -gt 0 ]; do
     --debug) profile=debug ;;
     --skip-checks) run_checks=0 ;;
     --install) do_install=1 ;;
+    --allow-debug-key) allow_debug_key=1 ;;
     --out) shift; [ $# -gt 0 ] || die "--out needs a directory"; out="$1" ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
@@ -97,17 +113,14 @@ printf 'SDK:  %s\nNDK:  %s\nTools: %s\n' "$ANDROID_HOME" "$NDK_HOME" "$(basename
 signing=debug
 if [ -n "${MT_KEYSTORE:-}" ]; then
   signing=release
-  [ -f "$MT_KEYSTORE" ] || die "MT_KEYSTORE points at a file that does not exist: $MT_KEYSTORE"
-  [ -n "${MT_KEY_ALIAS:-}" ] || die "set MT_KEY_ALIAS to the key alias inside $MT_KEYSTORE"
-  case "$MT_KEYSTORE" in
-    "$root"/*) die "keep the keystore outside the repository, not at $MT_KEYSTORE" ;;
+  # Resolved against where the script was started, with symlinks followed, so that a
+  # relative path cannot slip a key into the repository.
+  keystore="$(cd "$start_dir" && python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$MT_KEYSTORE")"
+  [ -f "$keystore" ] || die "MT_KEYSTORE points at a file that does not exist: $MT_KEYSTORE"
+  [ -n "${MT_KEY_ALIAS:-}" ] || die "set MT_KEY_ALIAS to the key alias inside $keystore"
+  case "$keystore" in
+    "$root"/*) die "keep the keystore outside the repository, not at $keystore" ;;
   esac
-  if [ -z "${MT_KS_PASS:-}" ]; then
-    [ -t 0 ] || die "MT_KS_PASS is not set and there is no terminal to ask on"
-    read -rs -p "Keystore password: " MT_KS_PASS; echo
-  fi
-  export MT_KS_PASS
-  export MT_KEY_PASS="${MT_KEY_PASS:-$MT_KS_PASS}"
 elif [ "$profile" = release ]; then
   debug_ks="$HOME/.android/debug.keystore"
   [ -f "$debug_ks" ] || die "no $debug_ks (build any debug APK once, or set MT_KEYSTORE to sign with your own key)"
@@ -133,6 +146,8 @@ fi
 # --- build ------------------------------------------------------------------------
 
 step "Building the $profile APK (arm64)"
+build_marker="$(mktemp)"
+trap 'rm -f "$build_marker"' EXIT
 [ -d node_modules ] || pnpm install --frozen-lockfile
 if [ "$profile" = debug ]; then
   pnpm tauri android build --apk --debug --target aarch64
@@ -141,7 +156,8 @@ else
   pnpm tauri android build --apk --target aarch64
   built="$root/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk"
 fi
-[ -f "$built" ] || die "the build did not produce $built"
+[ -f "$built" ] && [ "$built" -nt "$build_marker" ] \
+  || die "the build did not produce a fresh $built (a stale file is never signed)"
 
 # --- sign, verify -------------------------------------------------------------------
 
@@ -161,8 +177,15 @@ elif [ "$signing" = release ]; then
   step "Signing with your release key"
   label=signed
   apk="$out/money-tracker-$version-arm64-signed.apk"
-  "$apksigner" sign --ks "$MT_KEYSTORE" --ks-key-alias "$MT_KEY_ALIAS" \
+  if [ -z "$ks_pass" ]; then
+    [ -t 0 ] || die "MT_KS_PASS is not set and there is no terminal to ask on"
+    read -rs -p "Keystore password: " ks_pass; echo
+  fi
+  # The passwords exist in the environment of this one command only.
+  MT_KS_PASS="$ks_pass" MT_KEY_PASS="${key_pass:-$ks_pass}" "$apksigner" sign \
+    --ks "$keystore" --ks-key-alias "$MT_KEY_ALIAS" \
     --ks-pass env:MT_KS_PASS --key-pass env:MT_KEY_PASS --out "$apk" "$built"
+  ks_pass=""; key_pass=""
 else
   step "Signing with the DEBUG key (test only)"
   label=TEST-SIGNED
@@ -172,9 +195,10 @@ else
 fi
 
 step "Verifying"
-"$apksigner" verify --print-certs "$apk" | sed -n '1,3p'
+# A file that fails a check is removed: nothing unverified is left under a normal name.
+"$apksigner" verify --print-certs "$apk" | sed -n '1,3p' || { rm -f "$apk"; die "the signature does not verify"; }
 if [ "$profile" = release ]; then
-  python3 scripts/check_offline.py apk "$apk" "$aapt2"
+  python3 scripts/check_offline.py apk "$apk" "$aapt2" || { rm -f "$apk"; die "the APK failed the offline guard; it was deleted"; }
 fi
 
 size="$(du -h "$apk" | cut -f1)"
@@ -196,6 +220,14 @@ if [ "$do_install" -eq 1 ]; then
   [ -n "$devices" ] || die "no device: connect a phone with USB debugging, or start an emulator"
   [ "$(printf '%s\n' "$devices" | wc -l | tr -d ' ')" -eq 1 ] \
     || die "more than one device is connected; unplug extras or set ANDROID_SERIAL"
+  if [ "$label" = TEST-SIGNED ] || [ "$label" = debug ]; then
+    serial="$(printf '%s\n' "$devices" | head -1)"
+    case "$serial" in
+      emulator-*) ;;
+      *) [ "$allow_debug_key" -eq 1 ] \
+           || die "refusing to put a debug-signed APK on a real phone ($serial): anyone can sign an 'update' with that key. Pass --allow-debug-key if you accept that for a throw-away test, or sign with your own key (MT_KEYSTORE)." ;;
+    esac
+  fi
   "$adb" install -r "$apk"
   printf 'Installed. Open "Money Tracker" on the device.\n'
 else
