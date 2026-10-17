@@ -1133,3 +1133,47 @@ Catatan: dua percobaan awal E2E gagal karena aplikasi Files di emulator macet (A
 | CODEOWNERS | `.github/CODEOWNERS` mencakup workflow, `scripts/`, daftar pengecualian, `deny.toml`, capability, `tauri.conf.json`, manifest. Penjaga memastikan berkasnya ada dan mencakup jalur itu. **Pemilik masih placeholder** dan harus diganti dengan nama pengguna GitHub sebelum push; aktifkan juga "Require review from Code Owners" di proteksi cabang `main` |  |
 
 Catatan jujur: SHA di atas diambil dari `git ls-remote` ke repositori masing-masing hari ini (tag rilis terbaru per versi mayor); saya tidak dapat memverifikasi isi tiap rilis, jadi pembaruan pin sebaiknya lewat Dependabot dengan peninjauan. CI GitHub belum pernah berjalan, jadi sintaks workflow dan nama input (`toolchain`, `tool`) belum teruji di runner.
+
+## 33. Fase 8: performa, uji kegagalan, dan APK rilis (2026-10-17)
+
+### F16 dan F17: putus daya saat penukaran data
+
+| Temuan | Perbaikan | Bukti |
+|---|---|---|
+| **F17** `money.db`, `-wal`, `-shm` dipindah dengan rename terpisah; bila terputus di antaranya, undo/pemulihan menghapus berkas di nama live, termasuk log WAL lama yang berisi commit yang belum di-checkpoint (**jendela kehilangan data nyata**, ditemukan oleh tes baru, bukan teori) | Pindah menjauh: pendamping dahulu, berkas utama terakhir (kembali: utama dahulu), jadi satu berkas utama yang sudah tiba berarti seluruh set tiba; gerakan yang terputus dikenali (pendamping lama di samping tanpa berkas utama lama) dan dibatalkan **tanpa menghapus apa pun** di nama live; `finish_swap` menghapus berkas utama terakhir; penanda mencakup seluruh set | tes menghentikan "proses" sebelum **setiap** rename (anggaran rename per thread) pada penukaran dengan dan tanpa kunci, undo, rollback setelah rename gagal, dan memotong `finish_swap` setelah tiap penghapusan, selalu dengan `-wal` panas berisi satu rekening yang tidak ada di tempat lain. Uji mutasi: dengan urutan lama, empat tes gagal |
+| **F16** rename tidak menyinkronkan direktori | modul `durable`: `write_atomic` (tmp + fsync + rename + fsync direktori) untuk `db.key`, `lock.json`, `backup_meta.json`; `sync_dir` setelah kelompok rename penukaran, undo, finish | tes `write_atomic` (tanpa sisa tmp, tmp basi ditimpa). **Batas:** fsync direktori tidak dapat diuji dengan benar-benar mencabut daya; bukti hanya kode dan urutan |
+
+### Rencana kueri dan pengukuran (100 000 transaksi, build rilis, host Apple silicon, SQLCipher dalam memori)
+
+`crates/storage/src/perf.rs` memeriksa `EXPLAIN QUERY PLAN` pada SQL yang benar-benar dijalankan (`page_query` dan konstanta laporan dipakai bersama) di setiap `cargo test`; pengukuran waktu ada di tes `ignored` (`cargo test -p mt-storage --release -- --ignored --nocapture perf_100k`).
+
+| Kueri | Sebelum | Sesudah | Catatan |
+|---|---|---|---|
+| Daftar halaman 50, terbaru | 0,07 ms | sama | `idx_tx_date`, tanpa sort |
+| Halaman berikutnya (kursor) | 2,7 ms | **0,06 ms** | kondisi OR diganti nilai baris `(occurred_on, id) < (?, ?)` |
+| Satu rekening / satu bulan / hanya pengeluaran | 0,05–0,07 ms | sama | indeks, tanpa sort |
+| Satu kategori (dengan anak) | 12 ms | sama | dua pencarian indeks digabung lalu disortir (diterima) |
+| Pencarian teks `LIKE '%x%'` | 21 ms | sama | pemindaian (diterima, tidak ada indeks yang membantu) |
+| Daftar rekening (saldo per rekening) | 33,5 ms | **3,0 ms** | migrasi 0003: indeks penutup `(account_id, amount_minor)` |
+| Kekayaan bersih | 33 ms | ~3 ms | memakai saldo yang sama |
+| Laporan pengeluaran, sebulan / setahun | 1,1 / 13 ms | sama | `idx_tx_date` |
+| Tren 12 bulan | 26 ms | sama | `idx_tx_date` |
+
+**Saldo tersimpan: tidak dibutuhkan.** Dengan indeks penutup, saldo pada 100 ribu baris 3 ms di host; pengguna nyata punya jauh lebih sedikit baris. Saldo tidak dapat melenceng karena tidak disimpan. Biayanya: satu indeks tambahan (tulis sedikit lebih berat, sekitar 2 MB pada 100 ribu baris). Pada perangkat kelas bawah angkanya perlu dikalikan sekian kali (belum diukur).
+
+### Argon2id dan waktu mulai
+
+| Ukuran | Hasil | Catatan |
+|---|---|---|
+| Satu pemeriksaan PIN (19 MiB, t=2, p=1) | **17 ms** per percobaan (host, rilis) | `perf_pin_hash_with_the_production_cost` |
+| Ekspor + enkripsi 100 ribu baris (64 MiB, t=3) | 206 ms; berkas 8,0 MB | |
+| Dekripsi + restore + verifikasi 100 ribu baris | 1,7 s | |
+| Mulai dingin, APK rilis, emulator arm64 Android 15 (`am start -W`, 5 kali) | 2,1 / 2,6 / 3,0 / 3,2 / 3,7 s | emulator di bawah beban host; sebagian besar inisialisasi WebView |
+
+**Belum terbukti pada perangkat kelas bawah.** Argon2 terikat memori dan CPU; waktu di ponsel murah dapat 5-20 kali angka host. Ukur di perangkat nyata: waktu buka kunci (harus tetap di bawah sekitar 1 detik), ekspor (KDF 64 MiB), dan mulai dingin. Perintah mulai dingin: `adb shell am force-stop com.moneytracker.app; adb shell am start -W -n com.moneytracker.app/.MainActivity`.
+
+### APK rilis untuk HP nyata
+
+* `pnpm tauri android build --apk --target aarch64` menghasilkan APK **tanpa tanda tangan**, **12,3 MB** (arm64; ponsel 32-bit tidak didukung). Penjaga APK (`check_offline.py apk`) lulus: tanpa INTERNET, `allowBackup=false`, tidak dapat di-debug, tanpa WebView debugging. `android_release_check.mjs` lulus di emulator: `FLAG_SECURE` tetap aktif walau `mt_insecure` diberikan.
+* Salinan **bertanda tangan kunci debug** untuk uji coba di ponsel Anda: `target/release-apk/money-tracker-0.1.0-arm64-TEST-SIGNED.apk` (diabaikan git). Pasang: `adb install -r <berkas>` atau pindahkan ke ponsel dan izinkan "pasang dari sumber ini". **Bukan untuk distribusi.** Kunci debug dikenal semua orang.
+* Menggantinya nanti dengan APK bertanda tangan kunci rilis sendiri memaksa uninstall (tanda tangan berbeda), yang menghapus data: **buat backup terenkripsi dulu** dan pulihkan setelahnya. Kunci rilis (keystore pribadi) adalah keputusan dan rahasia Anda; belum dibuat.

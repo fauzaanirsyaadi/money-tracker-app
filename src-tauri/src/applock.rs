@@ -1117,4 +1117,23 @@ mod tests {
         service.mark_unlocked();
         assert!(!service.is_locked());
     }
+
+    /// Time of one PIN check with the production Argon2id cost (the tests above use a
+    /// tiny cost on purpose). Run: cargo test -p money-tracker-app --release
+    /// -- --ignored --nocapture perf_pin_hash
+    #[test]
+    #[ignore = "timing: needs --release --ignored --nocapture"]
+    #[allow(clippy::print_stdout, reason = "the numbers are the point of this test")]
+    fn perf_pin_hash_with_the_production_cost() {
+        let params = Params::new(19 * 1024, 2, 1, Some(32)).unwrap();
+        let production = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let salt = SaltString::encode_b64(&[7u8; 16]).unwrap();
+        let hash = production.hash_password(b"493017", &salt).unwrap().to_string();
+        let parsed = PasswordHash::new(&hash).unwrap();
+        let started = Instant::now();
+        for _ in 0..5 {
+            production.verify_password(b"493017", &parsed).unwrap();
+        }
+        println!("PIN check (19 MiB, t=2, p=1): {:?} per attempt", started.elapsed() / 5);
+    }
 }
