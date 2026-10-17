@@ -11,3 +11,16 @@ vite.config.ts.timestamp-*
 
 # Cargo workspace build output
 /target
+
+# Python bytecode: never tracked (a committed .pyc can stand in for a guard module)
+__pycache__/
+*.pyc
+
+# Signing keys and built packages never belong in the repository
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.apk
+*.aab
+dist/

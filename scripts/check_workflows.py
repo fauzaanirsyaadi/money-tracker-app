@@ -9,6 +9,9 @@
 * No `pull_request_target` or `workflow_run` trigger (they run with secrets on
   untrusted code) and every workflow declares `permissions:` at the top level.
 * No `curl | sh` style installs in `run:` steps.
+* No compiled Python (`*.pyc`), signing key (`*.jks`, `*.keystore`, `*.p12`) or package
+  (`*.apk`, `*.aab`) is tracked by git: a tracked `.pyc` is loaded in place of its
+  `.py` by the guards themselves, so it could silently neuter one.
 * `.github/CODEOWNERS` exists and covers the files that define what CI trusts:
   the workflows, the guard scripts and the exceptions list, so that changing
   them needs the owner's review. A placeholder owner is allowed but reported.
@@ -17,6 +20,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -89,6 +93,28 @@ def check_codeowners(text: str | None) -> tuple[list[str], list[str]]:
     return problems, warnings
 
 
+FORBIDDEN_TRACKED = re.compile(r"(^|/)__pycache__/|\.(pyc|pyo|jks|keystore|p12|pfx|apk|aab)$", re.IGNORECASE)
+
+
+def forbidden_tracked(paths: list[str]) -> list[str]:
+    return [
+        f"WORKFLOW-GUARD FAIL: {path} is tracked by git; compiled Python, signing keys and packages must not be"
+        for path in paths
+        if FORBIDDEN_TRACKED.search(path)
+    ]
+
+
+def tracked_files(repo: Path) -> list[str] | None:
+    """`git ls-files`, or None when this is not a git checkout (nothing to check)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "ls-files", "-z"], capture_output=True, check=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [name for name in out.decode("utf-8", "replace").split("\0") if name]
+
+
 def check_repo(repo: Path) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     workflows = sorted((repo / ".github" / "workflows").glob("*.y*ml"))
@@ -96,6 +122,9 @@ def check_repo(repo: Path) -> tuple[list[str], list[str]]:
         fail(problems, "no workflow files found")
     for path in workflows:
         problems.extend(check_workflow(path.read_text(), str(path.relative_to(repo))))
+    tracked = tracked_files(repo)
+    if tracked is not None:
+        problems.extend(forbidden_tracked(tracked))
     owners = repo / ".github" / "CODEOWNERS"
     more, warnings = check_codeowners(owners.read_text() if owners.exists() else None)
     problems.extend(more)

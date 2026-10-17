@@ -78,6 +78,17 @@ class CodeownersTests(unittest.TestCase):
         self.assertTrue(problems)
 
 
+class TrackedFilesTests(unittest.TestCase):
+    def test_bytecode_keys_and_packages_are_refused_wherever_they_sit(self):
+        for path in ("scripts/__pycache__/guard_common.cpython-312.pyc", "x/y.pyc", "a/B.PYC", "release.jks",
+                     "k/my.keystore", "c.p12", "app.apk", "bundle.aab", "src/__pycache__/x"):
+            self.assertEqual(len(guard.forbidden_tracked([path])), 1, path)
+
+    def test_ordinary_files_pass(self):
+        paths = ["scripts/guard_common.py", "src/lib/api.ts", "docs/pycache-notes.md", "apkg.txt", "jks.md"]
+        self.assertEqual(guard.forbidden_tracked(paths), [])
+
+
 class RepoTests(unittest.TestCase):
     def test_the_repository_itself_passes(self):
         repo = Path(__file__).resolve().parent.parent
