@@ -123,10 +123,18 @@ impl AppState {
         &self,
         f: impl FnOnce(&mut Db) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        // The lock flag decides, not whether a connection happens to exist: the
+        // lifecycle hook sets the flag first and closes the database a moment
+        // later, and no command may slip through that moment.
+        if self.lock.is_locked() {
+            return Err(AppError::locked());
+        }
         let mut guard = self.db.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_mut() {
-            Some(db) => f(db),
-            None if self.lock.is_locked() => Err(AppError::locked()),
+            // Checked again under the database lock: a lock that engaged while
+            // this call waited for it must not run the closure.
+            Some(db) if !self.lock.is_locked() => f(db),
+            Some(_) => Err(AppError::locked()),
             None => Err(AppError::unavailable()),
         }
     }
@@ -164,5 +172,76 @@ impl AppState {
         if let Some(staged) = session.staged {
             crate::backup::remove_database(&staged.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use mt_storage::{Db, DbKey};
+
+    use super::*;
+
+    // --- F12: the lock flag, not the connection, decides ---------------------------
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mt-state-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn open_state(tag: &str, with_pin: bool) -> (AppState, std::path::PathBuf) {
+        let dir = dir(tag);
+        let lock = LockService::load(&dir, Instant::now());
+        if with_pin {
+            lock.set_pin(&zeroize::Zeroizing::new("493017".to_owned()))
+                .unwrap();
+        }
+        let db = Db::open_in_memory(&DbKey::new([3u8; 32])).unwrap();
+        (AppState::new(Some(db), lock), dir)
+    }
+
+    #[test]
+    fn data_commands_fail_with_locked_the_moment_the_flag_is_set_even_with_a_connection() {
+        let (state, dir) = open_state("locked-flag", true);
+        // Unlocked and open: the closure runs.
+        assert_eq!(state.with_db(|_| Ok(7)).unwrap(), 7);
+
+        // The flag is set but the lifecycle hook has not closed the database yet.
+        state.applock().lock_now();
+        let mut ran = false;
+        let err = state
+            .with_db(|_| {
+                ran = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::Locked);
+        assert!(!ran, "the closure must not run while locked");
+
+        // After the close it is still `locked`, and after the unlock it works again.
+        state.close_db();
+        assert_eq!(
+            state.with_db(|_| Ok(())).unwrap_err().code,
+            crate::error::ErrorCode::Locked
+        );
+        state.install_db(Db::open_in_memory(&DbKey::new([3u8; 32])).unwrap());
+        state.applock().mark_unlocked();
+        assert!(state.with_db(|_| Ok(())).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn without_a_lock_a_missing_connection_is_unavailable_not_locked() {
+        let (state, dir) = open_state("no-lock", false);
+        assert!(state.with_db(|_| Ok(())).is_ok());
+        state.close_db();
+        assert_eq!(
+            state.with_db(|_| Ok(())).unwrap_err().code,
+            crate::error::ErrorCode::Unavailable
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
