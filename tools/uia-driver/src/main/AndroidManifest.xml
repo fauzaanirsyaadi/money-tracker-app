@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Targets itself: `am instrument` restarts *this* package, never the app under test. -->
+    <instrumentation
+        android:name="androidx.test.runner.AndroidJUnitRunner"
+        android:label="Money Tracker UI driver"
+        android:targetPackage="com.moneytracker.uia" />
+
+    <application
+        android:allowBackup="false"
+        android:label="mt-uia"
+        android:usesCleartextTraffic="false" />
+</manifest>

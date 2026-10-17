@@ -2,7 +2,7 @@
 // On-device smoke test: installs the debug APK, then drives the quick-add flow
 // with real adb taps (FAB -> type 25000 -> Simpan) and asserts the saved row.
 //
-//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric] [--invalidate] [--only-invalidate]
+//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric] [--invalidate] [--only-invalidate] [--uia]
 //
 // With --lock it also sets a PIN and checks the app lock end to end: locked on
 // cold start and after backgrounding, wrong and right PIN, the delay after five
@@ -21,6 +21,10 @@
 // fingerprint enrolled) after `pm clear`, without reinstalling or doing the quick-add test.
 // Exactly one fingerprint must be enrolled beforehand.
 //
+// Text is typed with key events and verified, retrying on a mismatch (the default, and
+// enough: it passed under CPU load). --uia is an experiment: tools/uia-driver sets text
+// through the accessibility API (never shipped, never in CI; see its README).
+//
 // Needs a debug build (the release WebView is not inspectable, by design), an
 // emulator or device on adb, and Node 22+ (global fetch and WebSocket).
 // Taps are real input events, so this exercises focus, the keyboard and the
@@ -31,6 +35,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { createUia } from "./uia.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PACKAGE = "com.moneytracker.app";
@@ -127,8 +133,26 @@ const invokeCode = (command, payload = {}) =>
 
 // --- Typing that is checked ----------------------------------------------------
 
+/** The experimental accessibility driver (tools/uia-driver), only with --uia; null = key events. */
+let uiaDriver = null;
+
+/** Puts `text` into the focused field: atomically through the driver, else by key events. */
+async function enterText(text, clear) {
+  if (uiaDriver) {
+    try {
+      uiaDriver.run("settext", { value: text, focused: "true" });
+      return;
+    } catch (error) {
+      console.log(`INFO  the UI driver could not set the text (${error.message.slice(0, 120)}); using key events`);
+      // The driver may have set part or all of it before failing: start from empty.
+      await evaluate(clear);
+    }
+  }
+  adb("shell", "input", "text", text);
+}
+
 /**
- * Types `text` with real key events and checks what the field really holds,
+ * Sets `text` in the focused field and checks what the field really holds,
  * retrying from an empty field if keystrokes were dropped. Under host load
  * `adb input text` loses characters; the value is verified, never assumed,
  * so the assertions on what was saved stay exact.
@@ -136,7 +160,7 @@ const invokeCode = (command, payload = {}) =>
 async function typeVerified({ focus, read, clear, text, expected = text, attempts = 5 }) {
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     await evaluate(focus);
-    adb("shell", "input", "text", text);
+    await enterText(text, clear);
     await sleep(400);
     const value = await evaluate(read);
     if (value === expected) return;
@@ -208,6 +232,11 @@ async function main() {
     }
   });
   check("app started with an inspectable web view", true);
+  if (flag("--uia")) {
+    uiaDriver = createUia(adb, { root });
+    uiaDriver.ensure();
+    check("the accessibility driver is installed (text is set atomically, not typed)", true);
+  }
 
   const note = `smoke-${Date.now()}`;
   const accounts = await invoke("accounts_list", { includeArchived: false });
