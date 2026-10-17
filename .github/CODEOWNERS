@@ -1,0 +1,14 @@
+# Everything below defines what CI trusts. A change to any of it needs the
+# owner's review (turn on "Require review from Code Owners" in the branch
+# protection rule for main, or this file only suggests reviewers).
+#
+# Replace the placeholder with your GitHub username before pushing.
+*                                   @REPLACE-WITH-GITHUB-USERNAME
+/.github/workflows/                 @REPLACE-WITH-GITHUB-USERNAME
+/.github/CODEOWNERS                 @REPLACE-WITH-GITHUB-USERNAME
+/scripts/                           @REPLACE-WITH-GITHUB-USERNAME
+/scripts/guard_exceptions.json      @REPLACE-WITH-GITHUB-USERNAME
+/deny.toml                          @REPLACE-WITH-GITHUB-USERNAME
+/src-tauri/capabilities/            @REPLACE-WITH-GITHUB-USERNAME
+/src-tauri/tauri.conf.json          @REPLACE-WITH-GITHUB-USERNAME
+/src-tauri/gen/android/app/src/main/AndroidManifest.xml  @REPLACE-WITH-GITHUB-USERNAME
