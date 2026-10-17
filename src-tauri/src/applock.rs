@@ -31,8 +31,9 @@ const FORMAT: u32 = 1;
 
 /// Longest the system file picker may hold the app in the background before
 /// the lock applies as usual. Short on purpose: it exists only so choosing a
-/// backup file does not lock the user out of their own export.
-pub const EXTERNAL_UI_MAX: Duration = Duration::from_secs(120);
+/// backup file does not lock the user out of their own export. The window ends
+/// earlier, the moment the picker returns or is cancelled.
+pub const EXTERNAL_UI_MAX: Duration = Duration::from_secs(60);
 
 // debug-safe: InvalidPin carries a PinProblem category (too short, not digits), never the PIN
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,6 +427,11 @@ impl LockService {
             return;
         };
         let clock_went_back = wall.duration_since(away.wall).is_err();
+        if away.external_deadline.is_some() {
+            // The picker we launched has returned: its window is spent, whether
+            // or not the command awaiting it has reported back yet.
+            inner.external_until = None;
+        }
         let expired = if let Some(deadline) = away.external_deadline {
             now > deadline || clock_went_back
         } else {
@@ -777,6 +783,54 @@ mod tests {
             wall + Duration::from_secs(20),
         );
         assert!(!service.is_locked(), "back from the picker in time");
+    }
+
+    #[test]
+    fn the_picker_window_is_one_minute() {
+        assert_eq!(EXTERNAL_UI_MAX, Duration::from_secs(60));
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        let wall = SystemTime::now();
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        // Just inside the minute: still fine. Just outside: locked.
+        let inside = Duration::from_secs(59);
+        service.on_resumed(now + inside, wall + inside);
+        assert!(!service.is_locked());
+
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        let outside = Duration::from_secs(61);
+        service.on_resumed(now + outside, wall + outside);
+        assert!(service.is_locked());
+    }
+
+    #[test]
+    fn the_window_ends_when_the_picker_returns_even_before_the_command_reports() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        let wall = SystemTime::now();
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        service.on_resumed(now + Duration::from_secs(5), wall + Duration::from_secs(5));
+        assert!(!service.is_locked());
+        // `end_external_ui` has not run yet; leaving again must not ride on the old window.
+        service.on_suspended(now + Duration::from_secs(6), wall + Duration::from_secs(6));
+        assert!(service.is_locked(), "a spent window protects nothing");
+    }
+
+    #[test]
+    fn a_cancelled_picker_leaves_no_window_behind() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        // The picker was opened and cancelled without the app ever being suspended.
+        service.begin_external_ui(now);
+        service.end_external_ui();
+        service.on_suspended(now + Duration::from_secs(1), SystemTime::now());
+        assert!(service.is_locked());
     }
 
     #[test]

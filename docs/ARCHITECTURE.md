@@ -867,7 +867,7 @@ Rancangan keamanan ada di [SECURITY.md](SECURITY.md) (bagian "Backup terenkripsi
 | `src-tauri::backup` | `write_backup`, `stage_restore`, `swap_in`/`finish_swap`/`undo_swap`, `recover_interrupted` (dipanggil sebelum membuka DB saat start) |
 | `src-tauri::backup_cmd` | `backup_export`, `backup_restore_pick`, `backup_restore_prepare` (dapat diulang bila frasa sandi salah), `backup_restore_commit`, `backup_restore_cancel`. Sesi restore dihapus bersama berkasnya saat aplikasi terkunci |
 | `mt-platform` | `saveFile` / `pickFile` (SAF, `ACTION_CREATE_DOCUMENT` / `ACTION_OPEN_DOCUMENT`); Kotlin hanya menyalin ciphertext antara URI dan cache privat |
-| `applock` | `begin_external_ui` / `end_external_ui`: jendela sempit (maks. 2 menit, hanya di memori) agar picker tidak mengunci aplikasi |
+| `applock` | `begin_external_ui` / `end_external_ui`: jendela sempit (maks. 60 detik, ditutup saat picker kembali, hanya di memori) agar picker tidak mengunci aplikasi |
 
 ### Hasil uji
 
