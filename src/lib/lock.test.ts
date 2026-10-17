@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { autoLockLabel, formatCountdown, newPinProblem } from "./lock.ts";
+import { autoLockLabel, biometricFailureMessage, formatCountdown, newPinProblem } from "./lock.ts";
 
 test("acceptable PINs pass", () => {
   for (const pin of ["493017", "7391028456", "123457", "1234560"]) {
@@ -35,4 +35,12 @@ test("auto-lock labels", () => {
   assert.equal(autoLockLabel(30), "30 dtk");
   assert.equal(autoLockLabel(60), "1 mnt");
   assert.equal(autoLockLabel(300), "5 mnt");
+});
+
+test("a dismissed biometric prompt says nothing; a changed enrolment explains the PIN", () => {
+  assert.equal(biometricFailureMessage("cancelled"), null);
+  assert.match(biometricFailureMessage("biometric_invalidated")!, /dimatikan.*PIN.*Pengaturan/);
+  assert.match(biometricFailureMessage("unavailable")!, /Gunakan PIN/);
+  // The enrolment message never talks about data or recovery.
+  assert.doesNotMatch(biometricFailureMessage("biometric_invalidated")!, /data|pulih|cadangan/i);
 });

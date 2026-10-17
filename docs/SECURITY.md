@@ -32,7 +32,7 @@ Konsekuensi yang harus dipahami:
 
 - Penyerang yang punya **akses root atau berkas aplikasi** dapat mengubah `lock.json` (menghapus kunci, mengatur ulang hitungan salah) lalu membuka aplikasi. PIN **tidak** melindungi dari penyerang di tingkat ini; yang melindungi adalah Keystore: berkas `money.db` tanpa kunci terbungkus tidak terbaca, dan kunci tidak keluar dari Keystore.
 - Karena bukan kriptografis, **PIN lupa tidak punya jalan pemulihan di dalam aplikasi**. Jalannya adalah **backup terenkripsi** (langkah B) dan memulihkannya pada instalasi bersih. Sebelum backup tersedia, aplikasi memperingatkan pengguna saat mengatur PIN.
-- Hasil biometrik adalah keputusan boolean dari sistem; aplikasi tidak memakai `CryptoObject`. Hasilnya dikirim dari kode native langsung ke Rust, sehingga skrip di WebView tidak dapat memalsukannya (hanya dapat *meminta* prompt).
+- Biometrik membuka aplikasi lewat **kunci Keystore tersendiri** (bagian "Kunci biometrik" di bawah), bukan lewat kunci basis data. Hasilnya dikirim dari kode native langsung ke Rust, sehingga skrip di WebView tidak dapat memalsukannya (hanya dapat *meminta* prompt).
 
 ## PIN ulang untuk tindakan yang mengambil atau mengganti data
 
@@ -43,6 +43,17 @@ Aplikasi yang sedang terbuka di tangan orang lain tidak boleh tinggal satu ketuk
 - **melemahkan** kunci otomatis (tenggang lebih lama). Memperketat tidak butuh PIN.
 
 Step-up bukan oracle tebakan tambahan: PIN diperiksa lewat `verify_pin` yang sama dengan membuka kunci, jadi hitungan salah yang tersimpan, jeda, dan penolakan saat jeda berjalan **dibagi** antara layar kunci dan step-up. Tanpa PIN terpasang (atau `lock.json` rusak) tidak ada yang bisa diminta, dan tindakan tidak diblokir.
+
+## Kunci biometrik (F8)
+
+Prompt biometrik tidak lagi sekadar boolean. Saat biometrik diaktifkan (setelah PIN ulang), kode native membuat kunci AES-GCM **dengan alias sendiri** (`money_tracker_biometric_unlock_v1`, tidak pernah sama dengan `money_tracker_db_key_wrap_v<N>`), dengan `setUserAuthenticationRequired(true)` (tiap pemakaian butuh biometrik kuat baru) dan `setInvalidatedByBiometricEnrollment(true)`. Kunci itu diikat ke `BiometricPrompt` lewat `CryptoObject` dan hanya setelah sidik jari atau wajah sungguhan ia membuka sebuah **token acak 32 byte** yang disegel saat pendaftaran. Rust hanya menyimpan blob tersegel dan **hash SHA-256 token** di `lock.json` (token sendiri tidak disimpan di mana pun); buka-kunci biometrik berhasil bila token yang dilepas kunci cocok dengan hash (perbandingan waktu-konstan).
+
+Bila sidik jari atau wajah baru didaftarkan di ponsel, Android membatalkan kunci itu. Akibatnya **hanya** buka-kunci biometrik yang dimatikan: blob dan hash dihapus, pengguna dibawa ke PIN dengan pesan yang menjelaskan, dan dapat mengaktifkannya lagi di Pengaturan. Kegagalan ini:
+
+- **tidak pernah** diklasifikasikan sebagai `key_gone`, tidak pernah memicu layar pemulihan, dan tidak menyentuh kunci basis data, `db.key`, atau `money.db` (tipe hasilnya, `UnlockOutcome::Invalidated`, dan kode galatnya, `biometric_invalidated`, terpisah dari kosakata penyimpanan; `settle_biometric_unlock` hanya menerima `LockService`);
+- hanya tiga sinyal yang dianggap permanen untuk kunci biometrik (`KeyPermanentlyInvalidatedException`, alias hilang, token tersegel tidak lagi terautentikasi); yang lain sementara, biometrik tetap aktif dan PIN tersedia.
+
+Yang dicegah: orang yang tahu PIN layar kunci ponsel menambahkan sidik jarinya sendiri lalu memakainya untuk membuka aplikasi ini; kunci lama sudah batal dan harus lewat PIN aplikasi. Yang tersisa: ini tetap gerbang UI, bukan enkripsi data (K2), dan penyerang dengan akses root dapat menyunting `lock.json` seluruhnya.
 
 ## Data hilang atau tidak terbaca
 
@@ -79,7 +90,7 @@ Hitungan salah disimpan di `lock.json` (bertahan setelah reboot). Jeda tidak dis
 | Lokasi | Data yang lewat | Catatan |
 |---|---|---|
 | `mt-keystore` (`KeyVault.kt` ↔ `mobile.rs`) | **Kunci DB dalam teks biasa** pada `unwrap` (hasil) dan `wrap` (masukan), berupa string hex di JSON lewat jembatan plugin Tauri | Satu-satunya titik di mana kunci melewati Kotlin/JNI. String hex tidak dapat di-zeroize (L4). Tidak dicatat di log; kesalahan dibuat generik |
-| `mt-platform` (`PlatformPlugin.kt`) | Hasil biometrik (`success`/`cancelled`/`failed`), boolean tema bar sistem | Tidak ada data keuangan atau PIN |
+| `mt-platform` (`PlatformPlugin.kt`) | Hasil biometrik (`success`/`cancelled`/`failed`/`invalidated`), token buka-kunci 32 byte dan blob tersegelnya (hex), boolean tema bar sistem | Tidak ada data keuangan, PIN, atau kunci basis data |
 | `MainActivity.kt` | `FLAG_SECURE`, inset jendela | Tidak ada data |
 | `lock.json`, `money.db`, `db.key` | Dibaca/ditulis hanya oleh Rust (`std::fs`) | Tidak melewati Kotlin |
 | PIN | WebView → IPC Tauri → Rust (`Zeroizing`) | Tidak melewati Kotlin; salinan sisi WebView tidak dapat dijamin terhapus |

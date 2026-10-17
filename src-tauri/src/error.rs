@@ -26,6 +26,9 @@ pub enum ErrorCode {
     LockedOut,
     /// The user dismissed a prompt or picker.
     Cancelled,
+    /// A fingerprint or face was added (or the key is gone): biometric unlock was
+    /// switched off and the PIN opens the app. Not a storage problem.
+    BiometricInvalidated,
     /// The PIN must be entered before this destructive recovery step.
     PinRequired,
     /// The backup passphrase is too weak to use.

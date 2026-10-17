@@ -2,6 +2,9 @@ package com.plugin.mt_platform
 
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.activity.result.ActivityResult
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
@@ -17,6 +20,12 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
+import java.security.KeyStore
+import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 @InvokeArg
 class SystemBarsArgs {
@@ -28,6 +37,14 @@ class PromptArgs {
     var title: String = ""
     var subtitle: String = ""
     var negative: String = ""
+}
+
+@InvokeArg
+class UnlockArgs {
+    var title: String = ""
+    var subtitle: String = ""
+    var negative: String = ""
+    var blob: String = ""
 }
 
 @InvokeArg
@@ -68,24 +85,79 @@ class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(ret)
     }
 
+    // --- Biometric unlock ---------------------------------------------------
+    //
+    // A key of its own (BiometricKeyPolicy.ALIAS, never the database key) is
+    // bound to the prompt through a CryptoObject, so the prompt's success is not
+    // just a boolean: the key opens only after a real fingerprint or face, and
+    // only the token it releases unlocks the app. The key is invalidated when a
+    // new fingerprint or face is enrolled; that switches biometric unlock off
+    // and is never a storage problem.
+
+    private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+
+    private fun newBiometricKey(): SecretKey {
+        val spec = KeyGenParameterSpec.Builder(
+            BiometricKeyPolicy.ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(true)
+            .setInvalidatedByBiometricEnrollment(true)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // Every use needs a fresh strong biometric, not a recent unlock.
+                    setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+                } else {
+                    @Suppress("DEPRECATION")
+                    setUserAuthenticationValidityDurationSeconds(-1)
+                }
+            }
+            .build()
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(spec)
+        return generator.generateKey()
+    }
+
+    private fun existingBiometricKey(): SecretKey =
+        (keyStore().getKey(BiometricKeyPolicy.ALIAS, null) as? SecretKey) ?: throw BiometricKeyPolicy.KeyMissing()
+
+    /** Removes the biometric key, if there is one. Never touches any other alias. */
+    private fun forgetBiometricKey() {
+        val store = keyStore()
+        if (store.containsAlias(BiometricKeyPolicy.ALIAS)) store.deleteEntry(BiometricKeyPolicy.ALIAS)
+    }
+
+    private fun replyBiometric(invoke: Invoke, outcome: String, token: ByteArray? = null, blob: ByteArray? = null) {
+        val ret = JSObject()
+        ret.put("outcome", outcome)
+        if (token != null) ret.put("token", BiometricKeyPolicy.hex(token))
+        if (blob != null) ret.put("blob", BiometricKeyPolicy.hex(blob))
+        invoke.resolve(ret)
+    }
+
     /**
-     * Shows the system prompt. The result is a plain gate on the app UI: the
-     * database key is not bound to it (see docs/SECURITY.md), so changing the
-     * enrolled fingerprints can never make the data unreadable.
+     * Shows the prompt with [cipher] bound to it. [onSuccess] receives the
+     * cipher the system authorised and must produce the reply.
      */
-    @Command
-    fun authenticate(invoke: Invoke) {
-        val args = invoke.parseArgs(PromptArgs::class.java)
+    private fun promptWith(
+        invoke: Invoke,
+        args: PromptArgs,
+        cipher: Cipher,
+        onSuccess: (Cipher) -> Unit,
+    ) {
         val host = activity as? FragmentActivity
         if (host == null) {
-            reply(invoke, "failed")
+            replyBiometric(invoke, "failed")
             return
         }
         var answered = false
-        val answer = { outcome: String ->
+        val answerOnce = { block: () -> Unit ->
             if (!answered) {
                 answered = true
-                reply(invoke, outcome)
+                block()
             }
         }
         host.runOnUiThread {
@@ -94,15 +166,28 @@ class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
                 ContextCompat.getMainExecutor(host),
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        answer("success")
+                        answerOnce {
+                            val authorised = result.cryptoObject?.cipher
+                            if (authorised == null) {
+                                replyBiometric(invoke, "failed")
+                            } else {
+                                try {
+                                    onSuccess(authorised)
+                                } catch (e: Exception) {
+                                    replyBiometric(invoke, outcomeOf(e))
+                                }
+                            }
+                        }
                     }
 
                     override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                        when (errorCode) {
-                            BiometricPrompt.ERROR_USER_CANCELED,
-                            BiometricPrompt.ERROR_NEGATIVE_BUTTON,
-                            BiometricPrompt.ERROR_CANCELED -> answer("cancelled")
-                            else -> answer("failed")
+                        answerOnce {
+                            when (errorCode) {
+                                BiometricPrompt.ERROR_USER_CANCELED,
+                                BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                                BiometricPrompt.ERROR_CANCELED -> replyBiometric(invoke, "cancelled")
+                                else -> replyBiometric(invoke, "failed")
+                            }
                         }
                     }
                     // A single unrecognised fingerprint keeps the prompt open; nothing to do.
@@ -115,7 +200,81 @@ class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
                 .setAllowedAuthenticators(BIOMETRIC_STRONG)
                 .setConfirmationRequired(false)
                 .build()
-            prompt.authenticate(info)
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        }
+    }
+
+    private fun outcomeOf(failure: Throwable): String =
+        when (BiometricKeyPolicy.classify(failure)) {
+            BiometricKeyPolicy.Fate.INVALIDATED -> "invalidated"
+            BiometricKeyPolicy.Fate.TRANSIENT -> "failed"
+        }
+
+    /**
+     * Creates a fresh biometric key, proves it with the user's fingerprint or
+     * face, and returns a random token together with the token encrypted under
+     * that key. Rust keeps the blob and a hash of the token; the token itself
+     * is not stored anywhere.
+     */
+    @Command
+    fun biometricEnroll(invoke: Invoke) {
+        val args = invoke.parseArgs(PromptArgs::class.java)
+        val cipher: Cipher
+        try {
+            forgetBiometricKey()
+            val key = newBiometricKey()
+            cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+        } catch (e: Exception) {
+            replyBiometric(invoke, outcomeOf(e))
+            return
+        }
+        promptWith(invoke, args, cipher) { authorised ->
+            val token = ByteArray(BiometricKeyPolicy.TOKEN_BYTES).also { SecureRandom().nextBytes(it) }
+            val sealed = authorised.doFinal(token)
+            replyBiometric(invoke, "success", token, BiometricKeyPolicy.joinBlob(authorised.iv, sealed))
+        }
+    }
+
+    /**
+     * Opens the token sealed at enrolment. Only a successful strong biometric
+     * lets the key decrypt it. A key invalidated by a new enrolment (or missing)
+     * answers "invalidated"; the app then switches biometric unlock off.
+     */
+    @Command
+    fun biometricUnlock(invoke: Invoke) {
+        val args = invoke.parseArgs(UnlockArgs::class.java)
+        val split = BiometricKeyPolicy.unhex(args.blob)?.let { BiometricKeyPolicy.splitBlob(it) }
+        if (split == null) {
+            replyBiometric(invoke, "invalidated")
+            return
+        }
+        val (iv, sealed) = split
+        val cipher: Cipher
+        try {
+            cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, existingBiometricKey(), GCMParameterSpec(128, iv))
+        } catch (e: Exception) {
+            replyBiometric(invoke, outcomeOf(e))
+            return
+        }
+        promptWith(invoke, PromptArgs().also {
+            it.title = args.title
+            it.subtitle = args.subtitle
+            it.negative = args.negative
+        }, cipher) { authorised ->
+            replyBiometric(invoke, "success", token = authorised.doFinal(sealed))
+        }
+    }
+
+    /** Switches biometric unlock off at the Keystore: deletes this key and only this key. */
+    @Command
+    fun biometricForget(invoke: Invoke) {
+        try {
+            forgetBiometricKey()
+            replyBiometric(invoke, "done")
+        } catch (e: Exception) {
+            replyBiometric(invoke, "failed")
         }
     }
 

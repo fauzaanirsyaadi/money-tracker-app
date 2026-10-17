@@ -2,7 +2,7 @@
 // On-device smoke test: installs the debug APK, then drives the quick-add flow
 // with real adb taps (FAB -> type 25000 -> Simpan) and asserts the saved row.
 //
-//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric]
+//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric] [--invalidate]
 //
 // With --lock it also sets a PIN and checks the app lock end to end: locked on
 // cold start and after backgrounding, wrong and right PIN, the delay after five
@@ -11,6 +11,11 @@
 // With --biometric it also exercises the fingerprint prompt. That needs an
 // emulator with a fingerprint enrolled (device PIN set, then
 // `am start -a android.settings.BIOMETRIC_ENROLL` and `adb emu finger touch 1`).
+//
+// With --invalidate (needs --biometric) it then enrols one more fingerprint through the
+// system settings (device PIN from DEVICE_PIN, default 1234) and checks that only
+// biometric unlock is switched off: the PIN still opens the app, the data is
+// intact, storage stays "ok" (no recovery screen), and biometrics can be re-enabled.
 //
 // Needs a debug build (the release WebView is not inspectable, by design), an
 // emulator or device on adb, and Node 22+ (global fetch and WebSocket).
@@ -325,7 +330,86 @@ async function biometricFlow() {
   await until("unlocked", async () => !(await lockScreenShown()));
   check("the enrolled finger still works afterwards", true);
 
+  if (flag("--invalidate")) await invalidationFlow(lockScreenShown);
+
   check("the lock can be removed", (await invokeCode("lock_remove", { current: PIN })) === "ok");
+}
+
+/** Adds a fingerprint through Settings, as a user (or someone who knows the phone's PIN) would. */
+async function enrollFingerprint(id) {
+  const devicePin = process.env.DEVICE_PIN ?? "1234";
+  adb("shell", "am", "force-stop", "com.android.settings");
+  adb("shell", "am", "start", "-a", "android.settings.FINGERPRINT_ENROLL");
+  const dump = () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        adb("shell", "uiautomator", "dump", "/sdcard/mt-ui.xml");
+        return adb("shell", "cat", "/sdcard/mt-ui.xml");
+      } catch {
+        // animating; retry
+      }
+    }
+    return "";
+  };
+  let added = false;
+  for (let step = 0; step < 60 && !added; step += 1) {
+    const xml = dump();
+    if (xml.includes("Re-enter your PIN") || xml.includes("Confirm your PIN")) {
+      adb("shell", "input", "text", devicePin);
+      adb("shell", "input", "keyevent", "KEYCODE_ENTER");
+      await sleep(2500);
+      continue;
+    }
+    let tapped = false;
+    for (const want of ["DONE", "Done", "I AGREE", "AGREE", "MORE", "NEXT", "Next"]) {
+      const m = new RegExp(`text="${want}"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`).exec(xml);
+      if (m) {
+        adb("shell", "input", "tap", String((Number(m[1]) + Number(m[3])) / 2 | 0), String((Number(m[2]) + Number(m[4])) / 2 | 0));
+        tapped = true;
+        if (want === "DONE" || want === "Done") added = true;
+        await sleep(2000);
+        break;
+      }
+    }
+    if (!tapped) {
+      finger(id);
+      await sleep(1500);
+    }
+  }
+  if (!added) throw new Error("could not enrol an extra fingerprint");
+  adb("shell", "am", "start", "-n", ACTIVITY);
+}
+
+async function invalidationFlow(lockScreenShown) {
+  const before = await invoke("accounts_list", { includeArchived: false });
+  check("biometric unlock is on before the enrolment changes", (await invoke("lock_status")).biometricEnabled === true);
+
+  await enrollFingerprint(3);
+  await startApp();
+  await until("lock screen", lockScreenShown);
+  await until("the explanation", async () => evaluate("document.body.innerText.includes('biometrik dimatikan')"), 30_000);
+  check("a new fingerprint switches biometric unlock off with an explanation", true);
+  const status = await invoke("lock_status");
+  check("biometric unlock is off", status.biometricEnabled === false);
+  check("it is not reported as a storage problem", status.storage === "ok" && status.locked === true, status.storage);
+  check("the recovery screen is not shown", !(await evaluate("document.body.innerText.includes('Mulai dari awal')")));
+
+  check("the PIN still opens the app", (await invokeCode("lock_unlock_pin", { pin: PIN })) === "ok");
+  const after = await invoke("accounts_list", { includeArchived: false });
+  check("the data is intact", JSON.stringify(after) === JSON.stringify(before));
+
+  // Re-enabling works with the new enrolment (fresh PIN first).
+  await invoke("lock_step_up", { pin: PIN });
+  const enabling = invoke("lock_biometric_set", { enabled: true });
+  await sleep(2500);
+  finger(3);
+  check("biometric unlock can be enabled again", (await enabling).biometricEnabled === true);
+  await startApp();
+  await until("lock screen", lockScreenShown);
+  await sleep(2500);
+  finger(3);
+  await until("unlocked by the new fingerprint", async () => !(await lockScreenShown()));
+  check("the re-enrolled biometric key unlocks", true);
 }
 
 async function lockFlow(top, dpr) {

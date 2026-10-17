@@ -37,5 +37,11 @@ zeroize = { version = "1", features = ["serde"] }
 # Pure Rust; no_std-capable, so it adds only blake2, base64ct, password-hash and subtle.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
 
+# Checks the biometric unlock token against the hash kept in lock.json. Both are
+# RustCrypto (MIT OR Apache-2.0, maintained) and already in the tree through tauri
+# and argon2; naming them here adds no new code to the build.
+sha2 = "0.10"
+subtle = "2"
+
 [lints]
 workspace = true

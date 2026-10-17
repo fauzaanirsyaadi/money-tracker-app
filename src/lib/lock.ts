@@ -29,3 +29,18 @@ export function autoLockLabel(seconds: number): string {
   if (seconds < 60) return `${seconds} dtk`;
   return `${seconds / 60} mnt`;
 }
+
+/**
+ * What to tell the user when the fingerprint/face prompt did not unlock the app,
+ * or null when nothing needs saying (they just dismissed it).
+ */
+export function biometricFailureMessage(code: string): string | null {
+  switch (code) {
+    case "cancelled":
+      return null;
+    case "biometric_invalidated":
+      return "Sidik jari atau wajah di ponsel berubah, jadi buka dengan biometrik dimatikan. Buka dengan PIN, lalu aktifkan lagi di Pengaturan.";
+    default:
+      return "Biometrik tidak berhasil. Gunakan PIN.";
+  }
+}

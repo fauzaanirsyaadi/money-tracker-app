@@ -5,7 +5,7 @@ use tauri::{AppHandle, Runtime, plugin::PluginApi};
 
 use std::path::Path;
 
-use crate::{BiometricAvailability, BiometricOutcome, Error, FileOutcome, Result};
+use crate::{BiometricAvailability, EnrollOutcome, Error, FileOutcome, Result, UnlockOutcome};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
@@ -27,13 +27,27 @@ impl<R: Runtime> MtPlatform<R> {
         Ok(BiometricAvailability::Unavailable)
     }
 
-    pub async fn authenticate(
+    pub async fn biometric_enroll(
         &self,
         _title: &str,
         _subtitle: &str,
         _negative: &str,
-    ) -> Result<BiometricOutcome> {
-        Ok(BiometricOutcome::Failed)
+    ) -> Result<EnrollOutcome> {
+        Ok(EnrollOutcome::Failed)
+    }
+
+    pub async fn biometric_unlock(
+        &self,
+        _title: &str,
+        _subtitle: &str,
+        _negative: &str,
+        _blob: &[u8],
+    ) -> Result<UnlockOutcome> {
+        Ok(UnlockOutcome::Failed)
+    }
+
+    pub async fn biometric_forget(&self) -> Result<()> {
+        Ok(())
     }
 
     /// There is no Storage Access Framework on desktop builds.

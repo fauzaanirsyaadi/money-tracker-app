@@ -1906,6 +1906,8 @@ dependencies = [
  "mt-storage",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-mt-keystore",
@@ -3400,6 +3402,7 @@ dependencies = [
  "serde",
  "tauri",
  "tauri-plugin",
+ "zeroize",
 ]
 
 [[package]]

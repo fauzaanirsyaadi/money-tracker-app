@@ -101,6 +101,7 @@ export type ErrorCode =
   | "wrong_pin"
   | "locked_out"
   | "cancelled"
+  | "biometric_invalidated"
   | "pin_required"
   | "weak_passphrase"
   | "wrong_passphrase"

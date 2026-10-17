@@ -24,6 +24,9 @@ use argon2::{
 };
 use mt_core::{AutoLock, PinProblem, is_plausible_pin, lockout_delay, validate_new_pin};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+use tauri_plugin_mt_platform::hex;
 use zeroize::Zeroizing;
 
 pub(crate) const LOCK_FILE: &str = "lock.json";
@@ -72,6 +75,21 @@ struct Record {
     failed: u32,
     biometric: bool,
     auto_lock_secs: u32,
+    /// The token the biometric key sealed at enrolment (hex of `iv || ciphertext`).
+    /// Useless without the Keystore key, which opens only for a fresh biometric.
+    #[serde(default)]
+    bio_blob: Option<String>,
+    /// SHA-256 of the token (hex): what a token released by the key is checked against.
+    #[serde(default)]
+    bio_check: Option<String>,
+}
+
+impl Record {
+    /// Biometric unlock needs both the switch and the material from an enrolment:
+    /// a switch left on without it (an older file, a damaged field) means off.
+    fn biometric_ready(&self) -> bool {
+        self.biometric && self.bio_blob.is_some() && self.bio_check.is_some()
+    }
 }
 
 #[cfg_attr(desktop, allow(dead_code, reason = "set by the mobile lifecycle hook"))]
@@ -208,7 +226,7 @@ impl LockService {
             configured: inner.record.is_some() || inner.broken,
             locked: inner.locked,
             broken: inner.broken,
-            biometric_enabled: inner.record.as_ref().is_some_and(|r| r.biometric),
+            biometric_enabled: inner.record.as_ref().is_some_and(Record::biometric_ready),
             auto_lock_seconds: inner
                 .record
                 .as_ref()
@@ -295,6 +313,8 @@ impl LockService {
             pin_hash: hash_pin(pin)?,
             failed: 0,
             biometric: false,
+            bio_blob: None,
+            bio_check: None,
             auto_lock_secs: AutoLock::DEFAULT.seconds(),
         };
         write_record(&self.path, &record).map_err(|_| LockError::Io)?;
@@ -352,8 +372,47 @@ impl LockService {
         Ok(())
     }
 
-    pub fn set_biometric(&self, enabled: bool) -> Result<(), LockError> {
-        self.update(|record| record.biometric = enabled)
+    /// Turns biometric unlock on with the material from a fresh enrolment.
+    pub fn enable_biometric(&self, token: &[u8], blob: &[u8]) -> Result<(), LockError> {
+        let check = hex::encode(&Sha256::digest(token));
+        let blob = hex::encode(blob);
+        self.update(|record| {
+            record.biometric = true;
+            record.bio_blob = Some(blob);
+            record.bio_check = Some(check);
+        })
+    }
+
+    /// Turns biometric unlock off and forgets its material. The PIN is unaffected.
+    pub fn disable_biometric(&self) -> Result<(), LockError> {
+        self.update(|record| {
+            record.biometric = false;
+            record.bio_blob = None;
+            record.bio_check = None;
+        })
+    }
+
+    /// The sealed token to hand to the biometric prompt, when biometric unlock is on.
+    pub fn biometric_blob(&self) -> Option<Vec<u8>> {
+        let inner = self.state();
+        let record = inner.record.as_ref().filter(|r| r.biometric_ready())?;
+        hex::decode(record.bio_blob.as_deref()?)
+    }
+
+    /// Whether `token`, released by the biometric key, is the one enrolled.
+    pub fn biometric_token_matches(&self, token: &[u8]) -> bool {
+        let inner = self.state();
+        let Some(expected) = inner
+            .record
+            .as_ref()
+            .filter(|r| r.biometric_ready())
+            .and_then(|r| r.bio_check.as_deref())
+            .and_then(hex::decode)
+        else {
+            return false;
+        };
+        let actual = Sha256::digest(token);
+        bool::from(expected.as_slice().ct_eq(actual.as_slice()))
     }
 
     pub fn set_auto_lock(&self, seconds: u32) -> Result<(), LockError> {
@@ -906,10 +965,60 @@ mod tests {
     fn settings_reject_unknown_auto_lock_values_and_need_a_pin() {
         let dir = Dir::new();
         let (service, _) = fresh(&dir);
-        assert_eq!(service.set_biometric(true), Err(LockError::NotConfigured));
+        assert_eq!(
+            service.enable_biometric(&[1; 32], &[2; 40]),
+            Err(LockError::NotConfigured)
+        );
         service.set_pin(&pin("493017")).unwrap();
         assert_eq!(service.set_auto_lock(45), Err(LockError::InvalidChoice));
-        service.set_biometric(true).unwrap();
-        assert!(service.snapshot(Instant::now()).biometric_enabled);
+    }
+
+    #[test]
+    fn biometric_unlock_needs_the_enrolment_material_and_checks_the_token() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        assert!(!service.snapshot(now).biometric_enabled);
+        assert_eq!(service.biometric_blob(), None);
+        assert!(!service.biometric_token_matches(&[7; 32]));
+
+        service.enable_biometric(&[7; 32], &[9; 40]).unwrap();
+        assert!(service.snapshot(now).biometric_enabled);
+        assert_eq!(service.biometric_blob(), Some(vec![9; 40]));
+        assert!(service.biometric_token_matches(&[7; 32]));
+        assert!(!service.biometric_token_matches(&[8; 32]));
+        assert!(!service.biometric_token_matches(&[]));
+
+        // It survives a restart, and the token itself is not in the file.
+        let again = LockService::load(&dir.0, now);
+        assert!(again.snapshot(now).biometric_enabled);
+        assert!(again.biometric_token_matches(&[7; 32]));
+        let text = fs::read_to_string(dir.0.join(LOCK_FILE)).unwrap();
+        assert!(
+            !text.contains(&hex::encode(&[7u8; 32])),
+            "only a hash of the token is kept"
+        );
+
+        service.disable_biometric().unwrap();
+        assert!(!service.snapshot(now).biometric_enabled);
+        assert_eq!(service.biometric_blob(), None);
+        assert!(!service.biometric_token_matches(&[7; 32]));
+        // The PIN is untouched by any of this.
+        assert!(service.verify_pin(&pin("493017"), now).is_ok());
+    }
+
+    #[test]
+    fn a_switch_left_on_without_material_means_off() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        // An older file: `biometric: true` and no blob or check.
+        let text = fs::read_to_string(dir.0.join(LOCK_FILE)).unwrap();
+        let edited = text.replace("\"biometric\":false", "\"biometric\":true");
+        assert_ne!(text, edited);
+        fs::write(dir.0.join(LOCK_FILE), edited).unwrap();
+        let again = LockService::load(&dir.0, now);
+        assert!(!again.snapshot(now).biometric_enabled);
+        assert!(!again.biometric_token_matches(&[0; 32]));
     }
 }

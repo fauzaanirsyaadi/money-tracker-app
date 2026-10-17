@@ -4,8 +4,8 @@
   import { ApiError, lock } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
   import Icon from "$lib/components/Icon.svelte";
-  import { formatCountdown } from "$lib/lock";
-  import { applyLockStatus, lockState } from "$lib/session.svelte";
+  import { biometricFailureMessage, formatCountdown } from "$lib/lock";
+  import { applyLockStatus, lockState, refreshLock } from "$lib/session.svelte";
 
   let pin = $state("");
   let busy = $state(false);
@@ -77,7 +77,9 @@
       applyLockStatus(await lock.unlockBiometric());
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
-      if (err.code !== "cancelled") error = "Biometrik tidak berhasil. Gunakan PIN.";
+      error = biometricFailureMessage(err.code) ?? "";
+      // A changed enrolment switched biometric unlock off: learn the new state.
+      if (err.code === "biometric_invalidated") void refreshLock();
     } finally {
       busy = false;
     }

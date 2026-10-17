@@ -27,6 +27,15 @@ class AliasVersionsTest {
     }
 
     @Test
+    fun theBiometricKeyAliasIsNotADatabaseAlias() {
+        // Same literal as mt-platform's BiometricKeyPolicy.ALIAS: the database-key
+        // code must never count, keep or prune it (F8).
+        assertNull(AliasVersions.versionOf("money_tracker_biometric_unlock_v1"))
+        assertEquals(emptyList<Int>(), AliasVersions.versions(listOf("money_tracker_biometric_unlock_v1")))
+        assertEquals(emptyList<Int>(), AliasVersions.stale(AliasVersions.versions(listOf("money_tracker_biometric_unlock_v1")), 255))
+    }
+
+    @Test
     fun versionsIgnoreForeignAliasesAndSort() {
         val aliases = listOf("zzz", "money_tracker_db_key_wrap_v3", "money_tracker_db_key_wrap_v1", "money_tracker_db_key_wrap_v3")
         assertEquals(listOf(1, 3), AliasVersions.versions(aliases))

@@ -6,7 +6,12 @@ use tauri::{
 
 use std::path::Path;
 
-use crate::{BiometricAvailability, BiometricOutcome, Error, FileOutcome, Result};
+use zeroize::Zeroizing;
+
+use crate::{
+    BiometricAvailability, EnrollOutcome, Enrollment, Error, FileOutcome, Result, UnlockOutcome,
+    hex,
+};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
@@ -26,6 +31,14 @@ struct PromptText<'a> {
     title: &'a str,
     subtitle: &'a str,
     negative: &'a str,
+}
+
+#[derive(Serialize)]
+struct UnlockRequest<'a> {
+    title: &'a str,
+    subtitle: &'a str,
+    negative: &'a str,
+    blob: &'a str,
 }
 
 #[derive(Serialize)]
@@ -50,6 +63,14 @@ struct Status {
 #[derive(Deserialize)]
 struct Outcome {
     outcome: String,
+}
+
+// debug-safe: no Debug derive; the token and blob stay out of any log
+#[derive(Deserialize)]
+struct BiometricReply {
+    outcome: String,
+    token: Option<String>,
+    blob: Option<String>,
 }
 
 pub struct MtPlatform<R: Runtime>(PluginHandle<R>);
@@ -77,20 +98,20 @@ impl<R: Runtime> MtPlatform<R> {
         })
     }
 
-    /// Shows the system fingerprint/face prompt and waits for the user.
-    ///
-    /// The answer comes from native code straight to Rust; the WebView never
-    /// supplies it, so it cannot be forged from script.
-    pub async fn authenticate(
+    /// Creates a fresh biometric key, shows the system fingerprint/face prompt
+    /// bound to it, and returns the token it released together with the sealed
+    /// copy. The answer comes from native code straight to Rust; the WebView
+    /// never supplies it, so it cannot be forged from script.
+    pub async fn biometric_enroll(
         &self,
         title: &str,
         subtitle: &str,
         negative: &str,
-    ) -> Result<BiometricOutcome> {
-        let response: Outcome = self
+    ) -> Result<EnrollOutcome> {
+        let response: BiometricReply = self
             .0
             .run_mobile_plugin_async(
-                "authenticate",
+                "biometricEnroll",
                 PromptText {
                     title,
                     subtitle,
@@ -99,10 +120,69 @@ impl<R: Runtime> MtPlatform<R> {
             )
             .await?;
         Ok(match response.outcome.as_str() {
-            "success" => BiometricOutcome::Success,
-            "cancelled" => BiometricOutcome::Cancelled,
-            _ => BiometricOutcome::Failed,
+            "success" => {
+                let token = response.token.as_deref().and_then(hex::decode);
+                let blob = response.blob.as_deref().and_then(hex::decode);
+                match (token, blob) {
+                    (Some(token), Some(blob)) => EnrollOutcome::Enrolled(Enrollment {
+                        token: Zeroizing::new(token),
+                        blob,
+                    }),
+                    _ => EnrollOutcome::Failed,
+                }
+            }
+            "cancelled" => EnrollOutcome::Cancelled,
+            _ => EnrollOutcome::Failed,
         })
+    }
+
+    /// Shows the prompt bound to the biometric key and returns the token that
+    /// the key releases from `blob` after a real biometric.
+    pub async fn biometric_unlock(
+        &self,
+        title: &str,
+        subtitle: &str,
+        negative: &str,
+        blob: &[u8],
+    ) -> Result<UnlockOutcome> {
+        let blob = hex::encode(blob);
+        let response: BiometricReply = self
+            .0
+            .run_mobile_plugin_async(
+                "biometricUnlock",
+                UnlockRequest {
+                    title,
+                    subtitle,
+                    negative,
+                    blob: &blob,
+                },
+            )
+            .await?;
+        Ok(match response.outcome.as_str() {
+            "success" => response
+                .token
+                .as_deref()
+                .and_then(hex::decode)
+                .map_or(UnlockOutcome::Failed, |token| {
+                    UnlockOutcome::Token(Zeroizing::new(token))
+                }),
+            "cancelled" => UnlockOutcome::Cancelled,
+            "invalidated" => UnlockOutcome::Invalidated,
+            _ => UnlockOutcome::Failed,
+        })
+    }
+
+    /// Deletes the biometric key (and only that key) from the Keystore.
+    pub async fn biometric_forget(&self) -> Result<()> {
+        let response: Outcome = self
+            .0
+            .run_mobile_plugin_async("biometricForget", ())
+            .await?;
+        if response.outcome == "done" {
+            Ok(())
+        } else {
+            Err(Error::Platform)
+        }
     }
 
     /// Lets the user choose where to save `source` (Storage Access Framework)
