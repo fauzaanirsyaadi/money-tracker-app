@@ -74,7 +74,7 @@ pub fn initialize(app: &AppHandle, state: &AppState) {
         }
         Ok(None) => {}
     }
-    if state.applock().is_locked() {
+    if state.applock_early().is_locked() {
         // Opened by the unlock, which reports its own problems.
         return;
     }

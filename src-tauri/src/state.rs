@@ -2,7 +2,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{Mutex, PoisonError},
+    sync::{Mutex, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -49,7 +49,12 @@ pub struct StagedRestore {
 /// successful unlock and dropped (closing the connection) when the app locks.
 pub struct AppState {
     db: Mutex<Option<Db>>,
-    lock: LockService,
+    /// Published by the start-up thread as soon as `lock.json` is read; see
+    /// [`AppState::pending`].
+    lock: OnceLock<LockService>,
+    /// Set once start-up has finished (lock loaded, storage inspected). Everything
+    /// that answers questions about the data waits for it.
+    ready: OnceLock<()>,
     restore: Mutex<RestoreSession>,
     problem: Mutex<Option<StorageProblem>>,
     /// Serialises everything that changes which files are the live data or
@@ -62,10 +67,34 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// A ready state, for tests.
+    #[cfg(test)]
     pub fn new(db: Option<Db>, lock: LockService) -> Self {
+        let state = Self::empty(db);
+        state.publish_lock(lock);
+        state.mark_ready();
+        state
+    }
+
+    /// A state that exists before anything has been read from disk.
+    ///
+    /// Start-up used to read the data directory, the lock file and the storage
+    /// inside Tauri's `setup` hook, which holds the window back; most of that time
+    /// is spent waiting for the (busy) main thread. Now `setup` only creates this
+    /// and a thread fills it in. Until then **nothing answers as unlocked**:
+    /// [`AppState::applock`] and everything built on it block (they run on
+    /// async-runtime threads, never on the main thread, which must stay free to
+    /// serve the Kotlin calls start-up itself makes), and the main-thread
+    /// lifecycle hook uses [`AppState::applock_if_ready`], which never blocks.
+    pub fn pending() -> Self {
+        Self::empty(None)
+    }
+
+    fn empty(db: Option<Db>) -> Self {
         Self {
             db: Mutex::new(db),
-            lock,
+            lock: OnceLock::new(),
+            ready: OnceLock::new(),
             restore: Mutex::new(RestoreSession::default()),
             problem: Mutex::new(None),
             storage_op: tauri::async_runtime::Mutex::new(()),
@@ -73,7 +102,28 @@ impl AppState {
         }
     }
 
+    /// Start-up, step 1: the lock has been read. (A second call is ignored.)
+    pub fn publish_lock(&self, lock: LockService) {
+        let _ = self.lock.set(lock);
+    }
+
+    /// Start-up, last step: storage has been inspected and any problem recorded.
+    pub fn mark_ready(&self) {
+        let _ = self.ready.set(());
+    }
+
+    #[cfg(test)]
+    pub fn is_ready(&self) -> bool {
+        self.ready.get().is_some()
+    }
+
+    /// Blocks until start-up has finished.
+    pub fn wait_ready(&self) {
+        self.ready.wait();
+    }
+
     pub fn problem(&self) -> Option<StorageProblem> {
+        self.wait_ready();
         *self.problem.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -101,7 +151,10 @@ impl AppState {
         match *guard {
             Some((at, generation))
                 if now.saturating_duration_since(at) < STEP_UP_WINDOW
-                    && generation == self.lock.lock_generation() =>
+                    && self
+                        .lock
+                        .get()
+                        .is_some_and(|lock| lock.lock_generation() == generation) =>
             {
                 true
             }
@@ -139,8 +192,28 @@ impl AppState {
         &self.storage_op
     }
 
+    /// The app lock, once start-up has finished. **Blocks until then**: call it
+    /// from async commands and background threads, never from the main thread.
     pub fn applock(&self) -> &LockService {
-        &self.lock
+        self.wait_ready();
+        self.lock.wait()
+    }
+
+    /// The lock as soon as it is loaded, for start-up code that runs before
+    /// readiness is declared (it would otherwise wait for itself).
+    pub(crate) fn applock_early(&self) -> &LockService {
+        self.lock.wait()
+    }
+
+    /// The lock if start-up has finished, otherwise `None`. Never blocks: this is
+    /// what the main-thread lifecycle hook uses.
+    #[cfg_attr(
+        desktop,
+        allow(dead_code, reason = "used by the mobile lifecycle hook")
+    )]
+    pub fn applock_if_ready(&self) -> Option<&LockService> {
+        self.ready.get()?;
+        self.lock.get()
     }
 
     /// Runs `f` with the database, or fails with `locked` / `unavailable`.
@@ -151,14 +224,15 @@ impl AppState {
         // The lock flag decides, not whether a connection happens to exist: the
         // lifecycle hook sets the flag first and closes the database a moment
         // later, and no command may slip through that moment.
-        if self.lock.is_locked() {
+        let lock = self.applock();
+        if lock.is_locked() {
             return Err(AppError::locked());
         }
         let mut guard = self.db.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_mut() {
             // Checked again under the database lock: a lock that engaged while
             // this call waited for it must not run the closure.
-            Some(db) if !self.lock.is_locked() => f(db),
+            Some(db) if !lock.is_locked() => f(db),
             Some(_) => Err(AppError::locked()),
             None => Err(AppError::unavailable()),
         }
@@ -410,5 +484,113 @@ mod tests {
         // The lifecycle hook and the synchronous lock helpers run on the main thread.
         assert!(!include_str!("lib.rs").contains("storage_mutex"));
         assert!(!include_str!("applock.rs").contains("storage_mutex"));
+    }
+
+    // --- start-up is off the main thread, and nothing answers before it is done ------
+
+    fn blocked_for(wait: std::time::Duration, f: impl FnOnce() + Send + 'static) -> bool {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(wait).is_err()
+    }
+
+    #[test]
+    fn a_pending_state_blocks_every_answer_until_start_up_is_ready_then_answers_locked() {
+        use std::sync::Arc;
+        let dir = dir("pending");
+        let lock = LockService::load(&dir, Instant::now());
+        lock.set_pin(&zeroize::Zeroizing::new("493017".to_owned()))
+            .unwrap();
+        drop(lock);
+        let state = Arc::new(AppState::pending());
+        assert!(!state.is_ready());
+        assert!(
+            state.applock_if_ready().is_none(),
+            "the main-thread accessor never blocks"
+        );
+
+        // Each of these would have answered "unlocked" or "no problem" on a state
+        // that was not waiting; they must all be stuck.
+        let wait = std::time::Duration::from_millis(200);
+        let (s1, s2, s3) = (Arc::clone(&state), Arc::clone(&state), Arc::clone(&state));
+        assert!(blocked_for(wait, move || {
+            let _ = s1.applock().is_locked();
+        }));
+        assert!(blocked_for(wait, move || {
+            let _ = s2.problem();
+        }));
+        assert!(blocked_for(wait, move || {
+            let _ = s3.with_db(|_| Ok(()));
+        }));
+
+        // Start-up finishes on another thread; the same calls now answer, and
+        // the app is locked (a PIN exists), so nothing is open.
+        let starter = Arc::clone(&state);
+        let starter_dir = dir.clone();
+        std::thread::spawn(move || {
+            starter.publish_lock(LockService::load(&starter_dir, Instant::now()));
+            starter.mark_ready();
+        });
+        let answer = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    (
+                        state.applock().is_locked(),
+                        state.problem(),
+                        state.with_db(|_| Ok(())).unwrap_err().code,
+                    )
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(answer, (true, None, crate::error::ErrorCode::Locked));
+        assert!(state.applock_if_ready().is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_start_up_steps_themselves_do_not_wait_for_readiness() {
+        // `initialize` runs before ready is declared; it must be able to reach the lock.
+        let dir = dir("early");
+        let state = AppState::pending();
+        state.publish_lock(LockService::load(&dir, Instant::now()));
+        assert!(!state.applock_early().is_locked());
+        assert!(!state.is_ready());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_step_up_cannot_exist_before_the_lock_does() {
+        let state = AppState::pending();
+        state.grant_step_up(Instant::now(), 0);
+        assert!(!state.step_up_valid(Instant::now()));
+    }
+
+    /// Wiring, checked in the source: `setup` does no slow work and the main-thread
+    /// lifecycle hook never takes the blocking accessor.
+    #[test]
+    fn setup_is_light_and_the_main_thread_hook_never_waits() {
+        let lib = include_str!("lib.rs");
+        let setup =
+            &lib[lib.find(".setup(|app|").unwrap()..lib.find("// Leaving the foreground").unwrap()];
+        for slow in [
+            "app_data_dir",
+            "LockService::load",
+            "initialize(",
+            "clean_leftovers",
+        ] {
+            assert!(!setup.contains(slow), "setup must not call {slow}");
+        }
+        assert!(setup.contains("AppState::pending()"));
+        let hook = &lib[lib.find("// Leaving the foreground").unwrap()
+            ..lib.find("tauri::generate_handler!").unwrap()];
+        assert!(hook.contains("applock_if_ready()"));
+        assert!(
+            !hook.contains(".applock()"),
+            "the hook runs on the main thread and must not block"
+        );
     }
 }
