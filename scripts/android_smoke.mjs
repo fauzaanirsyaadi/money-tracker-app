@@ -284,6 +284,10 @@ async function biometricFlow() {
   const first = await invoke("lock_setup", { pin: PIN });
   check("a fingerprint is enrolled on this device", first.biometric === "available", first.biometric);
 
+  // Changing the biometric setting needs a fresh PIN (F11).
+  check("enabling biometrics is refused without a fresh PIN", (await invokeCode("lock_biometric_set", { enabled: true })) === "pin_required");
+  await invoke("lock_step_up", { pin: PIN });
+
   // Enabling proves the prompt works: it resolves only after a touch.
   const enabling = invoke("lock_biometric_set", { enabled: true });
   await sleep(2500);

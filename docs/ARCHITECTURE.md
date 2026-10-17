@@ -1066,3 +1066,15 @@ Masa berlaku konfirmasi PIN pemulihan (5 menit) terlalu lama untuk tindakan yang
 | **F15** `securityLevel()` bisa membuat kunci | Memakai kunci yang ada (`keyOrGone`), tidak pernah membuat | dikerjakan bersama alias bernomor versi |
 | **F19** Zeroization | `argon2` dengan fitur `zeroize`; `chacha20poly1305` memang sudah menghapus kunci dan state saat di-drop; PIN dan frasa sandi diterima perintah langsung sebagai `Zeroizing<String>` (fitur `serde` pada `zeroize`) | tes deserialisasi |
 | **F7** URI SAF tanpa pemeriksaan skema | `SafUri.isAcceptable`: hanya `content://` milik aplikasi lain; `file://`, skema lain, authority kosong, dan provider milik sendiri (termasuk dengan user-info/port) ditolak, di kedua callback | 6 tes JVM Kotlin (dijalankan CI) |
+
+
+---
+
+## 29. Kelompok 3, bagian A: PIN ulang dan jendela picker (2026-10-17)
+
+| Temuan | Perbaikan | Bukti |
+|---|---|---|
+| **F11** Tindakan sensitif tanpa PIN ulang | `lock_step_up(pin)` memverifikasi lewat `LockService::verify_pin` (penghitung tersimpan dan jeda yang sama dengan membuka kunci) lalu mencatat `(Instant, lock_generation)` di `AppState`. Berlaku `STEP_UP_WINDOW` = 60 detik dan gugur bila kunci menyala (`generation` naik) atau pemulihan selesai. Dijaga `lock::require_step_up`: `backup_export`, `backup_restore_commit` (sebelum `staged.take()`, dan sekali lagi di jalur pemulihan; sukses mengosongkan step-up), `lock_biometric_set` (dua arah), `lock_auto_set` **hanya bila tenggang bertambah**, dan `recovery_start_fresh`. `recovery_authenticate` dan jendela 5 menit dihapus; layar pemulihan memakai `lock_step_up` | `lock::tests`: ditolak tanpa step-up, diterima dengan step-up, gugur setelah 60 dtk dan tetap gugur, PIN salah tidak memberi apa pun dan menambah penghitung bersama (termasuk jeda: PIN benar ditolak saat jeda), salah di layar kunci dan di step-up dijumlahkan, tidak selamat dari kunci yang menyala, tanpa kunci valid tidak diminta, tabel "melemahkan"; tes pengawat memeriksa di sumber bahwa tiap perintah terjaga memanggil `require_step_up` sebelum pekerjaan lain; skrip perangkat memeriksa perintah nyata |
+| **F21** Jendela picker 120 detik | `EXTERNAL_UI_MAX` = 60 detik; `on_resumed` menghabiskan jendela begitu aplikasi kembali dari picker yang kita luncurkan (tanpa menunggu perintahnya melapor); pembatalan menghapusnya | tes batas 59/61 detik, jendela habis saat kembali, picker dibatalkan |
+
+UI: `guarded(aksi)` mencoba aksi; hanya bila backend menjawab `pin_required` lembar PIN (`StepUpSheet`) muncul, lalu aksi diulang sekali. Menutup lembar menggagalkan aksi dengan `cancelled`. Yang memutuskan tetap backend.

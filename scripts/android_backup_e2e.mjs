@@ -257,9 +257,9 @@ async function restoreThroughPicker(before, label, pin = null) {
     const early = await call("backup_restore_commit");
     check(`${label}: restore is refused before the PIN`, early.code === "pin_required", early.code);
     check(`${label}: the refusal changed nothing`, (await storage()) !== "ok");
-    const wrongPin = await call("recovery_authenticate", { pin: "000001" });
+    const wrongPin = await call("lock_step_up", { pin: "000001" });
     check(`${label}: a wrong PIN is refused`, wrongPin.code === "wrong_pin", wrongPin.code);
-    await must("recovery_authenticate", { pin });
+    await must("lock_step_up", { pin });
     // The refusal left the staged restore waiting: the commit below needs no second prepare.
   }
   await must("backup_restore_commit");
@@ -313,7 +313,7 @@ async function recoveryScenarios(before) {
   await damageAndStart(() => runAs(`rm -f ${db} ${db}-wal ${db}-shm ${key}`));
   const locked = await must("lock_status");
   check("a lock with no data is reported as lost data, not as a locked app", locked.storage === "database_missing" && locked.configured === true);
-  check("recovery asks for the PIN before anything destructive", locked.recoveryAuthenticated === false);
+  check("recovery asks for the PIN before anything destructive", locked.stepUpActive === false);
   const noWord = await call("recovery_start_fresh", { typed: "HAPUS" });
   check("starting fresh is refused without the PIN even with the word", noWord.code === "pin_required", noWord.code);
   check("the refusal changed nothing", (await storage()) === "database_missing" && !filesIn(dir).includes("money.db"));
@@ -328,7 +328,7 @@ async function recoveryScenarios(before) {
   runAs(`cp ${key} ${dir}/key.keep`);
   await damageAndStart(() => runAs(`rm -f ${key}`));
   check("a missing key is reported", (await storage()) === "key_missing");
-  await must("recovery_authenticate", { pin: PIN });
+  await must("lock_step_up", { pin: PIN });
   runAs(`cp ${dir}/key.keep ${key}`);
   const alarm = await call("recovery_start_fresh", { typed: "HAPUS" });
   check("the second look refuses to destroy readable data", alarm.code === "invalid_input", alarm.code);
@@ -341,9 +341,9 @@ async function recoveryScenarios(before) {
   check("the lock is still in place", status7.configured === true);
   await damageAndStart(() => runAs(`rm -f ${db} ${db}-wal ${db}-shm`));
   check("data lost behind a valid lock is reported", (await storage()) === "database_missing");
-  const wrongPin = await call("recovery_authenticate", { pin: "000001" });
+  const wrongPin = await call("lock_step_up", { pin: "000001" });
   check("a wrong PIN does not open the destructive steps", wrongPin.code === "wrong_pin");
-  await must("recovery_authenticate", { pin: PIN });
+  await must("lock_step_up", { pin: PIN });
   const fresh7 = await must("recovery_start_fresh", { typed: "HAPUS" });
   check("starting fresh behind a lock works with PIN and word", fresh7.storage === "ok" && fresh7.configured === false);
   check("it left a usable empty database", (await snapshot()).rows.length === 0);
@@ -367,7 +367,35 @@ try {
   const status = await must("lock_setup", { pin: PIN });
   check("a PIN is set (auto-lock: immediately)", status.configured && !status.locked);
 
+  // Guarded actions need a fresh PIN (F11): refused without it, and a wrong PIN
+  // counts against the same limit as unlocking.
+  const noStepUp = await call("backup_export", { passphrase: PASSPHRASE, name: FILE });
+  check("export is refused without a fresh PIN", noStepUp.code === "pin_required", noStepUp.code);
+  check("no picker opened for it", !inPicker());
+  const weaken = await call("lock_auto_set", { seconds: 30 });
+  check("a longer auto-lock is refused without a fresh PIN", weaken.code === "pin_required", weaken.code);
+  const bio = await call("lock_biometric_set", { enabled: false });
+  check("changing the biometric setting is refused without a fresh PIN", bio.code === "pin_required", bio.code);
+  const wrongStep = await call("lock_step_up", { pin: "000001" });
+  check("a wrong PIN is refused at the step-up", wrongStep.code === "wrong_pin", wrongStep.code);
+  check("the miss counts against the unlock limit", (await must("lock_status")).failedAttempts === 1);
+  const afterWrong = await call("backup_export", { passphrase: PASSPHRASE, name: FILE });
+  check("a wrong PIN grants nothing", afterWrong.code === "pin_required", afterWrong.code);
+  const stepped = await must("lock_step_up", { pin: PIN });
+  check("the right PIN opens the guarded actions and resets the count", stepped.stepUpActive === true && stepped.failedAttempts === 0);
+  await must("lock_auto_set", { seconds: 300 });
+  check("a longer auto-lock works with a fresh PIN", (await must("lock_status")).autoLockSeconds === 300);
+
+  // The step-up lapses after a minute.
+  await sleep(62_000);
+  check("the step-up has lapsed after a minute", (await must("lock_status")).stepUpActive === false);
+  const lapsed = await call("backup_export", { passphrase: PASSPHRASE, name: FILE });
+  check("export is refused again after it lapsed", lapsed.code === "pin_required", lapsed.code);
+  await must("lock_auto_set", { seconds: 0 });
+  check("a shorter auto-lock needs no PIN", (await must("lock_status")).autoLockSeconds === 0);
+
   // A weak passphrase is refused before the picker opens.
+  await must("lock_step_up", { pin: PIN });
   const weak = await call("backup_export", { passphrase: "pendek", name: FILE });
   check("a short passphrase is refused", weak.code === "weak_passphrase", weak.code);
   check("no picker opened for it", !inPicker());
@@ -442,6 +470,8 @@ try {
     input: { accountId: extra.id, categoryId: cats.find((c) => c.kind === "expense").id, kind: "expense", amountMinor: "999", note: "tambahan", occurredOn: "2026-10-14" },
   });
   check("an extra row exists before the second restore", (await snapshot()).rows.length === 43);
+  // With a lock in place, replacing the data needs a fresh PIN too.
+  await must("lock_setup", { pin: PIN });
   const picking2 = call("backup_restore_pick");
   await until("open picker", async () => inPicker(), 240_000);
   await tapWhen("the backup file", (n) => n.text === FILE, 90_000);
@@ -449,7 +479,13 @@ try {
   await until("app in front", async () => topActivity().includes(PACKAGE));
   const preview2 = await must("backup_restore_prepare", { passphrase: PASSPHRASE });
   check("the second preview shows the current data", preview2.current.transactions === 43);
+  const early2 = await call("backup_restore_commit");
+  check("restore over live data is refused without a fresh PIN", early2.code === "pin_required", early2.code);
+  check("the refusal left the live data alone", (await snapshot()).rows.length === 43);
+  await must("lock_step_up", { pin: PIN });
   await must("backup_restore_commit");
+  check("one confirmation covers one replacement", (await must("lock_status")).stepUpActive === false);
+  await must("lock_remove", { current: PIN });
   const again = await snapshot();
   check("restoring over existing data replaces it", JSON.stringify(again) === JSON.stringify(before));
 

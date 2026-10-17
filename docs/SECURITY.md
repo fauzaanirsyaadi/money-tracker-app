@@ -34,11 +34,21 @@ Konsekuensi yang harus dipahami:
 - Karena bukan kriptografis, **PIN lupa tidak punya jalan pemulihan di dalam aplikasi**. Jalannya adalah **backup terenkripsi** (langkah B) dan memulihkannya pada instalasi bersih. Sebelum backup tersedia, aplikasi memperingatkan pengguna saat mengatur PIN.
 - Hasil biometrik adalah keputusan boolean dari sistem; aplikasi tidak memakai `CryptoObject`. Hasilnya dikirim dari kode native langsung ke Rust, sehingga skrip di WebView tidak dapat memalsukannya (hanya dapat *meminta* prompt).
 
+## PIN ulang untuk tindakan yang mengambil atau mengganti data
+
+Aplikasi yang sedang terbuka di tangan orang lain tidak boleh tinggal satu ketukan dari mengekspor atau mengganti seluruh data. Karena itu tindakan berikut meminta PIN yang dikonfirmasi dalam **60 detik terakhir** ("step-up", hanya di memori, gugur begitu kunci aplikasi menyala atau pemulihan selesai):
+
+- ekspor cadangan; konfirmasi restore (juga saat pemulihan); langkah destruktif pemulihan ("mulai dari awal");
+- mengubah pengaturan biometrik;
+- **melemahkan** kunci otomatis (tenggang lebih lama). Memperketat tidak butuh PIN.
+
+Step-up bukan oracle tebakan tambahan: PIN diperiksa lewat `verify_pin` yang sama dengan membuka kunci, jadi hitungan salah yang tersimpan, jeda, dan penolakan saat jeda berjalan **dibagi** antara layar kunci dan step-up. Tanpa PIN terpasang (atau `lock.json` rusak) tidak ada yang bisa diminta, dan tindakan tidak diblokir.
+
 ## Data hilang atau tidak terbaca
 
 Aplikasi **tidak pernah membuat database atau kunci baru secara diam-diam** kecuali pada first run sebenarnya (tidak ada database, kunci terbungkus, maupun `lock.json`). Bila data hilang atau tidak terbaca, layar pemulihan menjelaskan sebabnya dan menawarkan hanya dua jalan, keduanya eksplisit: pulihkan dari cadangan, atau mulai dari awal setelah konfirmasi bahwa data lama akan hilang. Kegagalan yang mungkin sementara (Keystore sibuk) hanya menawarkan "Coba lagi" dan tidak mengubah apa pun. Rinciannya, termasuk matriks keadaan, ada di ARCHITECTURE.md §25.
 
-Layar pemulihan muncul sebelum layar PIN, tetapi **tindakan destruktifnya butuh PIN** bila `lock.json` valid dan terbaca (batas percobaan yang sama dengan membuka kunci; konfirmasi berlaku 5 menit di memori), ditambah kata `HAPUS` yang diketik untuk "mulai dari awal". Sebelum menghancurkan apa pun, aplikasi memeriksa ulang sekali: data yang ternyata terbuka, atau keadaan yang tidak bisa dipastikan, membatalkan tindakan. `lock.json` yang rusak tidak dapat diperiksa dan tidak memblokir. Pemulihan menghapus `lock.json` paling akhir, sehingga PIN dipasang ulang. Aturan lengkapnya (galat tak dikenal = sementara; hancurkan paling akhir) ada di CLAUDE.md dan ARCHITECTURE.md §26.
+Layar pemulihan muncul sebelum layar PIN, tetapi **tindakan destruktifnya butuh PIN** bila `lock.json` valid dan terbaca (batas percobaan yang sama dengan membuka kunci; konfirmasi berlaku 60 detik di memori, mekanisme PIN ulang di bawah), ditambah kata `HAPUS` yang diketik untuk "mulai dari awal". Sebelum menghancurkan apa pun, aplikasi memeriksa ulang sekali: data yang ternyata terbuka, atau keadaan yang tidak bisa dipastikan, membatalkan tindakan. `lock.json` yang rusak tidak dapat diperiksa dan tidak memblokir. Pemulihan menghapus `lock.json` paling akhir, sehingga PIN dipasang ulang. Aturan lengkapnya (galat tak dikenal = sementara; hancurkan paling akhir) ada di CLAUDE.md dan ARCHITECTURE.md §26.
 
 ## Backup terenkripsi
 
