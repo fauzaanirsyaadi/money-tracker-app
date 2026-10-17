@@ -14,6 +14,8 @@ mod recurring;
 #[cfg(test)]
 mod redaction_tests;
 mod reports;
+#[cfg(any(test, feature = "bench-support"))]
+mod seed;
 mod transactions;
 
 pub use accounts::Account;

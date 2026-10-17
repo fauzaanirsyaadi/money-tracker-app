@@ -29,6 +29,13 @@ zeroize = "1"
 # Reads the passphrase vectors shared with the UI (testdata/). Test scope only.
 # MIT OR Apache-2.0, maintained; already in the tree through the app.
 serde_json = "1"
+# Statistics-driven micro-benchmarks (`cargo bench`). MIT OR Apache-2.0, bheisler/criterion-rs,
+# maintained. Dev only; default features off.
+criterion = { version = "0.8", default-features = false }
+
+[[bench]]
+name = "crypto"
+harness = false
 
 [lints]
 workspace = true

@@ -6,7 +6,7 @@
 //!
 //!     cargo test -p mt-storage --release --test-threads=1 -- --ignored --nocapture perf
 
-use mt_core::{AccountDraft, AccountKind, Currency, Money, parse_iso_date};
+use mt_core::parse_iso_date;
 use rusqlite::params_from_iter;
 
 use crate::{
@@ -18,42 +18,7 @@ use crate::{
 
 fn db_with(rows: usize) -> Db {
     let mut db = Db::open_in_memory(&DbKey::new([4u8; 32])).unwrap();
-    let idr = |m| Money::from_minor(m, Currency::IDR).unwrap();
-    for n in 0..5 {
-        db.create_account(
-            &AccountDraft::new(&format!("Rekening {n}"), AccountKind::Bank, idr(1_000_000))
-                .unwrap(),
-            0,
-        )
-        .unwrap();
-    }
-    let expense_categories: i64 = db
-        .conn()
-        .query_row(
-            "SELECT COUNT(*) FROM categories WHERE kind = 'expense'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(expense_categories > 0);
-    // Rows are generated inside SQLite so that 100 000 of them take a moment, not a minute.
-    db.conn_mut()
-        .execute(
-            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1),
-                  c(id, k) AS (SELECT id, row_number() OVER (ORDER BY id) - 1
-                               FROM categories WHERE kind = 'expense')
-             INSERT INTO transactions(account_id, category_id, amount_minor, kind, note, occurred_on, created_at)
-             SELECT 1 + (n.i % 5),
-                    c.id,
-                    -(1000 + (n.i * 7919) % 500000),
-                    'expense',
-                    'catatan belanja ' || n.i,
-                    date('2022-01-01', '+' || ((n.i * 37) % 1825) || ' days'),
-                    0
-             FROM n JOIN c ON c.k = n.i % ?2",
-            rusqlite::params![i64::try_from(rows).unwrap(), expense_categories],
-        )
-        .unwrap();
+    db.seed_demo(rows);
     db
 }
 

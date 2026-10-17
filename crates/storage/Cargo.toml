@@ -16,5 +16,19 @@ serde_json = "1"
 # Wipes key material from memory. Apache-2.0 OR MIT, RustCrypto, maintained.
 zeroize = "1"
 
+[features]
+# Demo-data seeding (`Db::seed_demo`) for the benchmarks. Never enabled by the app.
+bench-support = []
+
+[dev-dependencies]
+# Statistics-driven micro-benchmarks (`cargo bench`). MIT OR Apache-2.0, bheisler/criterion-rs,
+# maintained. Dev only; default features off (no plotting or parallelism crates).
+criterion = { version = "0.8", default-features = false }
+
+[[bench]]
+name = "queries"
+harness = false
+required-features = ["bench-support"]
+
 [lints]
 workspace = true
