@@ -1168,7 +1168,7 @@ Catatan jujur: SHA di atas diambil dari `git ls-remote` ke repositori masing-mas
 | Satu pemeriksaan PIN (19 MiB, t=2, p=1) | **17 ms** per percobaan (host, rilis) | `perf_pin_hash_with_the_production_cost` |
 | Ekspor + enkripsi 100 ribu baris (64 MiB, t=3) | 206 ms; berkas 8,0 MB | |
 | Dekripsi + restore + verifikasi 100 ribu baris | 1,7 s | |
-| Mulai dingin, APK rilis, emulator arm64 Android 15 (`am start -W`, 5 kali) | 2,1 / 2,6 / 3,0 / 3,2 / 3,7 s | emulator di bawah beban host; sebagian besar inisialisasi WebView |
+| Mulai dingin, APK rilis, emulator arm64 Android 15 (`am start -W`, 5 kali, setelah diukur ulang dengan penanda waktu sementara) | 1,8 / 2,1 / 2,3 / 2,4 / 2,7 s | **Koreksi:** pengukuran pertama saya menulis "sebagian besar inisialisasi WebView" tanpa bukti. Setelah diukur, `setup` Rust adalah bagian terbesar: **1,1-2,1 s** dari 1,8-2,7 s. Di dalamnya `app_data_dir()` saja **0,75-1,4 s** (menunggu thread utama Kotlin yang sedang sibuk membuat Activity), lalu `initialize` (unwrap Keystore + buka DB) sekitar 0,35-0,8 s. `LockService::load` dan `clean_leftovers` hanya puluhan milidetik. Belum dioptimalkan (lihat usulan di bawah) |
 
 **Belum terbukti pada perangkat kelas bawah.** Argon2 terikat memori dan CPU; waktu di ponsel murah dapat 5-20 kali angka host. Ukur di perangkat nyata: waktu buka kunci (harus tetap di bawah sekitar 1 detik), ekspor (KDF 64 MiB), dan mulai dingin. Perintah mulai dingin: `adb shell am force-stop com.moneytracker.app; adb shell am start -W -n com.moneytracker.app/.MainActivity`.
 
@@ -1187,3 +1187,5 @@ Uji mutasi: menghilangkan satu pembagian sisa di `allocate` ditangkap `allocate_
 ### F24: kunci backup tidak boleh bergeser karena pembaruan pustaka
 
 Kunci backup diturunkan dari teks **NFKC**; bila sebuah rilis `unicode-normalization` mengubah normalisasi satu karakter, backup lama berhenti terbuka dengan frasa sandinya sendiri. Perbaikan: crate dipin ke versi persis (`=0.1.25`, komentar di `Cargo.toml` menjelaskan alasannya), dan 10 vektor tetap (komposisi/dekomposisi, lebar penuh, ligatur, U+FDFA, jamo Hangul, superskrip dan lingkaran, katakana setengah lebar, tanda ohm/angstrom, angka Romawi dan digraf) diperiksa dua kali: teks NFKC yang diharapkan dihasilkan oleh implementasi **independen** (Python `unicodedata`, Unicode 16.0), dan kunci turunan hasil Argon2id (parameter uji, garam tetap) dikunci dalam heks. Uji mutasi: mengganti NFKC dengan NFC membuat enam tes gagal.
+
+**Usulan (belum dikerjakan, menunggu keputusan pemilik):** `setup` menahan jendela sampai selesai. Memindahkan `app_data_dir()`, pemuatan kunci aplikasi, dan `initialize` ke thread latar belakang, dengan perintah yang menunggu sampai keadaan siap, dapat memangkas sebagian besar dari 1,1-2,1 s itu. Risikonya ada di kode kunci aplikasi (keadaan harus tetap "terkunci/belum siap" sampai selesai, tanpa jalur yang lolos), jadi perlu tes khusus dan dijalankan ulang di emulator.
