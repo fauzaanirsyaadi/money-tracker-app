@@ -6,9 +6,9 @@ title = "Money Tracker"
 useDefault = true
 
 [[allowlists]]
-description = "Test fixtures that only look like keys to the generic rule: a deliberately malformed Keystore alias name, and a fake account name used to prove error payloads carry no user data"
+description = "Test fixtures that only look like keys to the generic rule: a deliberately foreign Keystore alias name in a list of names the alias parser must ignore, and a fake account name used to prove error payloads carry no user data"
 targetRules = ["generic-api-key"]
 regexes = [
-  '''money_tracker_db_key_wrap_v-1''',
+  '''other_alias_v1''',
   '''Rekening-Rahasia-12345''',
 ]
