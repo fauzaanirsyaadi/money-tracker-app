@@ -1093,3 +1093,31 @@ UI: `guarded(aksi)` mencoba aksi; hanya bila backend menjawab `pin_required` lem
 | Mematikan, `lock_remove` | biometrik dimatikan di `lock.json` dahulu, baru kunci dihapus (best effort) |
 | Dependensi | `sha2` 0.10 dan `subtle` 2 disebut langsung di `src-tauri` (RustCrypto, MIT/Apache-2.0 dan BSD-3, sudah ada di pohon lewat tauri/argon2) |
 | Tes | Rust: token terdaftar membuka, token lain mematikan, `Invalidated` mematikan biometrik dan **tidak mengubah byte `money.db`/`db.key`**, `problem()` tetap `None`, PIN tetap bekerja, bisa diaktifkan lagi, batal/gagal tidak mengubah apa pun; Kotlin JVM: klasifikasi kunci biometrik (tiga sinyal permanen, sisanya sementara), alias biometrik bukan alias DB, tidak ada "GONE" dalam kosakatanya, blob dan hex; di `mt-keystore` alias biometrik tidak dikenali sebagai alias DB (tidak dihitung, ditahan, atau dipangkas) |
+
+## 31. Kelompok 3, bagian C, banner backup, vektor passphrase (2026-10-17)
+
+| Temuan | Perbaikan | Bukti |
+|---|---|---|
+| **Item 1** Pemangkasan alias harus aman | `prune_stale_aliases` hanya berjalan bila `db.key` terbaca, byte pertamanya nama alias, blob benar-benar membuka (alias yang disebut terbukti ada) dan tidak ada penanda tukar (`*.old`, `db.key.new`). Byte rusak seperti 200 tidak lagi berarti "semua alias lebih tua" | tes byte 0, kosong, berkas hilang, alias tidak ada, badan blob rusak, penanda tukar |
+| **F10** `Suspended` hilang saat unlock | `on_suspended` mencatat kepergian walau terkunci; `mark_unlocked` mengunci lagi seketika bila aplikasi pergi saat unlock dan tenggangnya nol, selain itu waktu pergi diukur dari kepergian yang sebenarnya; `open_and_unlock` menutup DB dan menjawab `locked` | 5 tes `applock` (tanpa tenggang, tenggang di dalam dan di luar, tidak ada yang pergi, sudah kembali sebelum unlock selesai, jendela picker) |
+| **F12** `with_db` hanya memeriksa koneksi | `with_db` gagal dengan `locked` selama flag kunci menyala, dicek sebelum dan sekali lagi di bawah kunci DB, sehingga tidak ada perintah yang lolos di antara flag menyala dan DB ditutup | 2 tes `state` (koneksi hidup tetapi flag menyala: closure tidak jalan) |
+| **F14** Balapan commit/initialize/start_fresh | `AppState::storage_mutex` (`tauri::async_runtime::Mutex`) diambil di awal perintah **async** `recovery_retry`, `recovery_start_fresh`, `backup_restore_commit`, dan kedua perintah unlock, sebelum pekerjaan ke `spawn_blocking`. Tidak pernah diambil oleh hook siklus hidup atau helper sinkron di thread utama (thread utama harus bebas melayani panggilan Kotlin yang ditunggu pekerjaan yang diblokir; pelajaran ANR); fungsi yang dilindungi tidak mengambilnya sendiri; prasyarat diperiksa ulang setelah mutex diambil | 24 operasi bersamaan tidak pernah tumpang tindih dan tidak buntu dengan thread utama tiruan yang melayani permintaan "Kotlin" (diuji mutasi: tanpa kunci pernyataan tumpang tindih gagal); tes sumber memastikan kelima perintah mengambil mutex lebih dulu dan `lib.rs`/`applock.rs` tidak pernah |
+
+### Banner backup
+
+`backup_meta.json` di samping DB menyimpan dua cap waktu: backup terakhir yang disimpan pengguna dan kapan aplikasi pertama melihat (agar "belum pernah" punya umur). Tidak ada jaringan dan tidak ada data keuangan. `backup_status` (hanya saat terbuka). Banner di atas tiap layar setelah 7 hari (atau 7 hari dipakai tanpa backup) dan satu baris di kartu cadangan. Cap di masa depan dihitung "hari ini".
+
+### Vektor passphrase bersama
+
+`testdata/passphrase_vectors.json` (ditulis tangan, bukan dihasilkan oleh salah satu implementasi) dibaca oleh tes Rust `mt-backup` (otoritas) dan tes UI. Tes UI mengungkap satu ketidakcocokan presedensi (Rust: "terlalu pendek" menang bila salah satu bentuk terlalu pendek, selain itu bentuk yang diketik); UI kini meniru Rust persis lewat `passphraseVerdict`. Satu vektor yang saya tulis salah (ekspektasi tangan) ikut ketahuan dan dikoreksi sesuai perilaku Rust.
+
+### Bukti perangkat (emulator, Keystore asli)
+
+| Skrip | Hasil |
+|---|---|
+| `android_backup_e2e.mjs` setelah bagian A | 93 pemeriksaan lulus (PIN ulang, lapse 60 dtk, restore dengan kunci) |
+| `android_smoke.mjs --lock --biometric` | 46 pemeriksaan (alur CryptoObject) |
+| `android_smoke.mjs --only-invalidate` | 13 pemeriksaan: sidik jari baru mematikan biometrik dengan penjelasan, penyimpanan tetap `ok`, tidak ada layar pemulihan, PIN membuka, data utuh, bisa diaktifkan lagi |
+| `android_backup_e2e.mjs` setelah bagian C | 93 pemeriksaan lulus |
+
+Catatan: dua percobaan awal E2E gagal karena aplikasi Files di emulator macet (ANR) dan menahan picker lebih dari 60 detik, sehingga kunci menyala; itu perilaku F21 yang benar. Skrip kini membuka Files sekali dan menunggu idle sebelum picker (jendela 60 detik tidak diubah). Banner dan vektor belum dijalankan di perangkat; keduanya diuji unit.
