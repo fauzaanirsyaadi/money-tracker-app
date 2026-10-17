@@ -164,6 +164,12 @@ fn open_and_unlock(app: &AppHandle) -> Result<(), AppError> {
     };
     state.install_db(db);
     state.applock().mark_unlocked();
+    if state.applock().is_locked() {
+        // The app left the foreground while it was being unlocked and the lock
+        // applies at once: nothing stays open behind it.
+        state.close_db();
+        return Err(AppError::locked());
+    }
     Ok(())
 }
 

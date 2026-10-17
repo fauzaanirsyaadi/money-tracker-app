@@ -288,10 +288,26 @@ impl LockService {
         }
     }
 
+    /// The unlock succeeded. If the app left the foreground *while* it was being
+    /// unlocked (the suspension was recorded although the app was locked), that
+    /// departure counts as if it had happened just now: with no grace the lock
+    /// engages again at once, otherwise the time away is measured from when the
+    /// app really left, when it comes back.
     pub fn mark_unlocked(&self) {
         let mut inner = self.state();
         inner.locked = false;
-        inner.suspended = None;
+        let relock = match (&inner.suspended, inner.record.as_ref()) {
+            (Some(away), Some(record)) => {
+                let grace = AutoLock::from_seconds(record.auto_lock_secs)
+                    .unwrap_or(AutoLock::DEFAULT)
+                    .grace();
+                away.external_deadline.is_none() && grace.is_zero()
+            }
+            _ => false,
+        };
+        if relock {
+            inner.engage();
+        }
     }
 
     pub fn lock_now(&self) {
@@ -452,10 +468,17 @@ impl LockService {
         let Some(seconds) = inner.record.as_ref().map(|r| r.auto_lock_secs) else {
             return;
         };
+        let external_deadline = inner.external_until.filter(|until| now < *until);
         if inner.locked {
+            // Already locked, but the departure still matters: an unlock may be
+            // in progress and finish after the app is gone (see `mark_unlocked`).
+            inner.suspended = Some(Suspension {
+                mono: now,
+                wall,
+                external_deadline,
+            });
             return;
         }
-        let external_deadline = inner.external_until.filter(|until| now < *until);
         let grace = AutoLock::from_seconds(seconds)
             .unwrap_or(AutoLock::DEFAULT)
             .grace();
@@ -1020,5 +1043,85 @@ mod tests {
         let again = LockService::load(&dir.0, now);
         assert!(!again.snapshot(now).biometric_enabled);
         assert!(!again.biometric_token_matches(&[0; 32]));
+    }
+
+    // --- F10: leaving while the unlock is still in progress ----------------------
+
+    #[test]
+    fn leaving_during_an_unlock_with_no_grace_locks_again_when_it_finishes() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.lock_now();
+        assert!(service.is_locked());
+        // Suspended while locked (the PIN is being checked), then the unlock completes.
+        service.on_suspended(now, SystemTime::now());
+        service.mark_unlocked();
+        assert!(
+            service.is_locked(),
+            "the app is in the background: it must not stay open"
+        );
+    }
+
+    #[test]
+    fn leaving_during_an_unlock_with_a_grace_is_measured_from_when_it_left() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.set_auto_lock(30).unwrap();
+        let wall = SystemTime::now();
+
+        // Back within the grace: stays unlocked.
+        service.lock_now();
+        service.on_suspended(now, wall);
+        service.mark_unlocked();
+        assert!(!service.is_locked());
+        let soon = Duration::from_secs(5);
+        service.on_resumed(now + soon, wall + soon);
+        assert!(!service.is_locked());
+
+        // Back after the grace, counted from the departure (not from the unlock).
+        service.lock_now();
+        service.on_suspended(now, wall);
+        service.mark_unlocked();
+        assert!(!service.is_locked());
+        let late = Duration::from_secs(31);
+        service.on_resumed(now + late, wall + late);
+        assert!(service.is_locked());
+    }
+
+    #[test]
+    fn an_unlock_that_nobody_left_stays_unlocked() {
+        let dir = Dir::new();
+        let (service, _) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.lock_now();
+        service.mark_unlocked();
+        assert!(!service.is_locked());
+    }
+
+    #[test]
+    fn a_departure_that_was_resumed_before_the_unlock_ended_does_not_relock() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.lock_now();
+        let wall = SystemTime::now();
+        service.on_suspended(now, wall);
+        service.on_resumed(now + Duration::from_secs(1), wall + Duration::from_secs(1));
+        service.mark_unlocked();
+        assert!(!service.is_locked(), "the app is back in front");
+    }
+
+    #[test]
+    fn a_picker_departure_during_an_unlock_still_gets_its_window() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.lock_now();
+        service.begin_external_ui(now);
+        service.on_suspended(now, SystemTime::now());
+        service.mark_unlocked();
+        assert!(!service.is_locked());
     }
 }
