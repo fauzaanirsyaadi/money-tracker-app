@@ -11,5 +11,11 @@ publish.workspace = true
 # maintained; default features off, so no macros/formatting/parsing code.
 time = { version = "0.3", default-features = false, features = ["std"] }
 
+[dev-dependencies]
+# Property tests for Money (allocate keeps the sum, add/sub invert, parse/format round
+# trip, no panics at the limits). Dev only: never in the app. MIT OR Apache-2.0,
+# proptest-rs, actively maintained. Default features off: no fork/timeout machinery.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

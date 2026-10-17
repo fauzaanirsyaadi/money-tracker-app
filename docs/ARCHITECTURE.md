@@ -351,7 +351,7 @@ magic "MTBK" | format_version u16 | kdf_id u8 | argon2 m,t,p (u32 each) | salt[1
 | ~~`tauri-plugin-biometric` 2.4~~ → `androidx.biometric` 1.1.0 | Prompt biometrik (lewat plugin `mt-platform`) | Apache-2.0 | Google, stabil | Hanya mobile. Diganti di Fase 7A (hasil tidak boleh lewat JS) |
 | `tauri-plugin-dialog` 2.8 | Dialog simpan/buka (SAF) | MIT/Apache-2.0 | Resmi Tauri | Ke R5 |
 | `tauri-plugin-fs` 2.7 | Baca/tulis URI `content://` | MIT/Apache-2.0 | Resmi Tauri | Hanya bila R5 mengharuskan |
-| `proptest` (dev) | Property test `Money` | MIT/Apache-2.0 | Aktif | Hanya dev |
+| `proptest` (dev) | Property test `Money` | MIT/Apache-2.0 | Aktif | Hanya dev. **Disetujui pemilik di Fase 8** (fitur bawaan dimatikan, hanya `std`; menambah `rand`, `rand_core`, `rand_xorshift`, `unarray` ke pohon dev) |
 | SQLCipher (via bundled) | Enkripsi DB | BSD-style (Zetetic) | Aktif | Wajib atribusi |
 | OpenSSL (vendored) | Kripto SQLCipher | Apache-2.0 | Aktif | Dikompilasi per ABI |
 
@@ -1177,3 +1177,9 @@ Catatan jujur: SHA di atas diambil dari `git ls-remote` ke repositori masing-mas
 * `pnpm tauri android build --apk --target aarch64` menghasilkan APK **tanpa tanda tangan**, **12,3 MB** (arm64; ponsel 32-bit tidak didukung). Penjaga APK (`check_offline.py apk`) lulus: tanpa INTERNET, `allowBackup=false`, tidak dapat di-debug, tanpa WebView debugging. `android_release_check.mjs` lulus di emulator: `FLAG_SECURE` tetap aktif walau `mt_insecure` diberikan.
 * Salinan **bertanda tangan kunci debug** untuk uji coba di ponsel Anda: `target/release-apk/money-tracker-0.1.0-arm64-TEST-SIGNED.apk` (diabaikan git). Pasang: `adb install -r <berkas>` atau pindahkan ke ponsel dan izinkan "pasang dari sumber ini". **Bukan untuk distribusi.** Kunci debug dikenal semua orang.
 * Menggantinya nanti dengan APK bertanda tangan kunci rilis sendiri memaksa uninstall (tanda tangan berbeda), yang menghapus data: **buat backup terenkripsi dulu** dan pulihkan setelahnya. Kunci rilis (keystore pribadi) adalah keputusan dan rahasia Anda; belum dibuat.
+
+### Property test `Money` (proptest, disetujui pemilik)
+
+`crates/core/tests/money_properties.rs`, 13 properti x 512 kasus, dengan nilai ekstrem (+-(2^53-1), 0) diberi bobot lebih: `from_minor` menerima tepat rentang simetris; `a + b - b == a` dan komutatif (hanya `Overflow` yang boleh menolak); `a - a == 0`, negasi involusi; mata uang berbeda tidak pernah bercampur; **`allocate` tidak pernah kehilangan atau menambah satu satuan minor**, bagian bertanda sama dengan keseluruhan, rasio nol mendapat nol, tiap bagian dalam satu satuan dari proporsi eksak, dan cermin untuk nilai negatif; `checked_mul_ratio` membulatkan ke terdekat dengan seri menjauhi nol (dibandingkan dengan aritmetika i128 independen); seri dibangun khusus karena acak hampir tak pernah jatuh tepat di tengah; pembagian nol dan `checked_mul` tidak pernah panik; `parse(format(x)) == x` untuk enam mata uang di seluruh rentang; `parse_decimal` pada teks acak (termasuk tumpukan digit raksasa) tidak pernah panik dan yang berhasil di-parse kanonik.
+
+Uji mutasi: menghilangkan satu pembagian sisa di `allocate` ditangkap `allocate_never_loses_or_invents_a_minor_unit`; mengganti `>=` menjadi `>` pada aturan seri hanya ditangkap setelah properti seri khusus ditambahkan (properti acak saja tidak menangkapnya, jadi saya menambahkannya). Tidak ada bug ditemukan pada kode `Money` itu sendiri.
