@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { autoLockLabel, biometricFailureMessage, formatCountdown, newPinProblem } from "./lock.ts";
+import {
+  autoLockLabel,
+  biometricFailureMessage,
+  formatCountdown,
+  newPinProblem,
+  STARTUP_STALL_MS,
+  startupStalled,
+} from "./lock.ts";
 
 test("acceptable PINs pass", () => {
   for (const pin of ["493017", "7391028456", "123457", "1234560"]) {
@@ -43,4 +50,11 @@ test("a dismissed biometric prompt says nothing; a changed enrolment explains th
   assert.match(biometricFailureMessage("unavailable")!, /Gunakan PIN/);
   // The enrolment message never talks about data or recovery.
   assert.doesNotMatch(biometricFailureMessage("biometric_invalidated")!, /data|pulih|cadangan/i);
+});
+
+test("a start-up that has not answered for too long is called stalled, once it has answered never", () => {
+  assert.equal(startupStalled(STARTUP_STALL_MS - 1, false), false);
+  assert.equal(startupStalled(STARTUP_STALL_MS, false), true);
+  assert.equal(startupStalled(STARTUP_STALL_MS * 10, true), false);
+  assert.equal(startupStalled(0, false), false);
 });

@@ -5,6 +5,7 @@
 
   import { page } from "$app/state";
   import { ApiError, lock, platform, recurring } from "$lib/api";
+  import { startupStalled } from "$lib/lock";
   import Icon from "$lib/components/Icon.svelte";
   import LockScreen from "$lib/components/LockScreen.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
@@ -42,6 +43,12 @@
   };
 
   let theme = $state<ThemePref>("auto");
+
+  // Start-up runs in the background and every command waits for it. If the first
+  // answer never comes (a Keystore that does not respond), say so instead of showing
+  // a blank screen; nothing is open in the meantime.
+  let startedAt = Date.now();
+  let stalled = $state(false);
 
   function applyTheme(value: ThemePref) {
     const root = document.documentElement;
@@ -120,7 +127,13 @@
     media.addEventListener("change", onSystemChange);
     document.addEventListener("visibilitychange", onVisibility);
     void refreshLock();
+    startedAt = Date.now();
+    const stallTimer = setInterval(() => {
+      stalled = startupStalled(Date.now() - startedAt, lockState.status !== null);
+      if (lockState.status !== null) clearInterval(stallTimer);
+    }, 1000);
     return () => {
+      clearInterval(stallTimer);
       media.removeEventListener("change", onSystemChange);
       document.removeEventListener("visibilitychange", onVisibility);
     };
@@ -133,7 +146,17 @@
 </script>
 
 {#if lockState.status === null}
-  <div class="cover" aria-hidden="true"></div>
+  {#if stalled}
+    <main class="stalled" role="alert">
+      <h1>Aplikasi belum selesai memulai</h1>
+      <p>
+        Tidak ada data yang dibuka. Tutup aplikasi sepenuhnya (geser dari daftar aplikasi terbaru)
+        lalu buka lagi. Jika terus begini, mulai ulang ponsel.
+      </p>
+    </main>
+  {:else}
+    <div class="cover" aria-hidden="true"></div>
+  {/if}
 {:else if lockState.status.storage !== "ok"}
   <RecoveryScreen />
 {:else if lockState.status.locked}
@@ -296,6 +319,22 @@
   .reminder a {
     color: var(--warning);
     text-decoration: none;
+  }
+  .stalled {
+    min-height: 100dvh;
+    display: grid;
+    align-content: center;
+    gap: var(--space-3);
+    padding: var(--space-5);
+    text-align: center;
+  }
+  .stalled h1 {
+    margin: 0;
+    font-size: var(--fs-lg);
+  }
+  .stalled p {
+    margin: 0;
+    color: var(--text-muted);
   }
   .notice {
     margin-bottom: var(--space-3);

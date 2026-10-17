@@ -44,3 +44,15 @@ export function biometricFailureMessage(code: string): string | null {
       return "Biometrik tidak berhasil. Gunakan PIN.";
   }
 }
+
+/** How long the app may take to start before the screen says so (nothing is open meanwhile). */
+export const STARTUP_STALL_MS = 25_000;
+
+/**
+ * Whether start-up has taken suspiciously long: the first answer from the backend
+ * is still missing. Start-up runs in the background and every command waits for
+ * it, so a hung Keystore would otherwise look like a blank screen forever.
+ */
+export function startupStalled(elapsedMs: number, statusKnown: boolean): boolean {
+  return !statusKnown && elapsedMs >= STARTUP_STALL_MS;
+}
