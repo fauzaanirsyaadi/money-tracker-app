@@ -38,8 +38,17 @@ ALLOWED_PERMISSIONS = {
     "android.permission.USE_FINGERPRINT",
 }
 
-# CSP source expressions that cannot reach a remote origin.
+# CSP source expressions that cannot reach a remote origin, and the directives each
+# may appear in: `data:` in a script-src would allow data-URL scripts, and the IPC
+# origins are for connect-src only.
 SAFE_CSP_SOURCES = {"'self'", "'none'", "data:", "ipc:", "http://ipc.localhost"}
+CSP_SOURCE_HOMES = {
+    "data:": {"img-src", "font-src"},
+    "ipc:": {"connect-src"},
+    "http://ipc.localhost": {"connect-src"},
+}
+# Directives that do not fall back to default-src, so the policy must say them.
+CSP_REQUIRED = ("default-src", "script-src", "base-uri", "form-action", "object-src", "frame-ancestors")
 UNSAFE_INLINE_ONLY_IN = {"style-src", "style-src-elem", "style-src-attr"}
 
 # The only permissions a capability may grant. An allow-list on purpose: a
@@ -57,15 +66,29 @@ SOURCE_RULES = {
         r"std::net\b|\bTcpStream\b|\bTcpListener\b|\bUdpSocket\b|\breqwest\b|\bhyper\b"
         r"|\bureq\b|\bsurf\b|\bisahc\b|\bcurl\b|\btokio::net\b|tungstenite"
     ),
-    ".kt": re.compile(r"HttpURLConnection|java\.net\.(URL|Socket)|okhttp|\bSocket\("),
+    ".kt": re.compile(r"HttpsURLConnection|HttpURLConnection|java\.net\.(\*|URL|Socket|ServerSocket|DatagramSocket)|okhttp|\bSocket\(|\bServerSocket\(|DatagramSocket"),
     ".svelte": re.compile(r"\bfetch\(|XMLHttpRequest|\bWebSocket\(|sendBeacon|EventSource\("),
     ".ts": re.compile(r"\bfetch\(|XMLHttpRequest|\bWebSocket\(|sendBeacon|EventSource\("),
     ".js": re.compile(r"\bfetch\(|XMLHttpRequest|\bWebSocket\(|sendBeacon|EventSource\("),
 }
+# Same rules for the other JS/TS spellings, and for Kotlin/Java scripts and sources.
+for _suffix in (".mjs", ".cjs", ".jsx", ".tsx", ".mts"):
+    SOURCE_RULES[_suffix] = SOURCE_RULES[".js"]
+SOURCE_RULES[".java"] = SOURCE_RULES[".kt"]
 URL = re.compile(r"https?://", re.IGNORECASE)
-URL_ALLOWED = ("http://www.w3.org/",)  # XML/SVG namespaces, not requests
-URL_SCANNED = {".svelte", ".ts", ".js", ".html", ".css", ".svg", ".json"}
-SKIP_DIRS = {"node_modules", "target", "build", ".svelte-kit", "gen", ".git", "dist"}
+# XML/SVG namespaces (not requests) and the loopback origins: Tauri's IPC bridge
+# (http://ipc.localhost) and the dev server (http://localhost:...), which are the device
+# talking to itself.
+URL_ALLOWED = ("http://www.w3.org/", "http://ipc.localhost", "http://localhost")
+URL_SCANNED = {".svelte", ".ts", ".js", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".html", ".css", ".svg", ".json"}
+# Build output and tooling caches. `gen` is NOT skipped any more (the committed
+# Android sources live in src-tauri/gen/android); only its generated schemas are.
+SKIP_DIRS = {"node_modules", "target", "build", ".svelte-kit", ".git", "dist", ".gradle"}
+SKIP_PATH_PREFIXES = (
+    "src-tauri/gen/schemas/",
+    # A build-time copy of tauri.conf.json, already scanned at its source.
+    "src-tauri/gen/android/app/src/main/assets/",
+)
 
 
 def fail(problems: list[str], message: str) -> None:
@@ -196,11 +219,15 @@ def check_csp(csp: object) -> list[str]:
             problems.append(f"CSP repeats {name}; browsers obey only the first, so repeats are refused")
             continue
         directives[name] = [token.lower() for token in tokens[1:]]
-    if "default-src" not in directives:
-        problems.append("CSP has no default-src")
+    for required in CSP_REQUIRED:
+        if required not in directives:
+            problems.append(f"CSP has no {required}")
     for name, sources in directives.items():
         for source in sources:
             if source in SAFE_CSP_SOURCES:
+                homes = CSP_SOURCE_HOMES.get(source)
+                if homes is not None and name not in homes:
+                    problems.append(f"CSP {name} may not allow {source!r} (only {sorted(homes)})")
                 continue
             if source == "'unsafe-inline'" and name in UNSAFE_INLINE_ONLY_IN:
                 continue
@@ -253,8 +280,27 @@ def _load_capability(path: Path) -> dict:
     return json.loads(text)
 
 
+RUNTIME_CAPABILITY = re.compile(r"\badd_capability\b|\bcapabilities_path_pattern\b")
+GLOB_CHARS = set("*?[]{}!")
+
+
 def check_capability(label: str, data: object) -> list[str]:
-    """One capability (a file's contents, or an inline object in tauri.conf.json)."""
+    """One capability file or inline object, in any shape Tauri reads.
+
+    Tauri accepts a single capability object, or an object with a `capabilities`
+    list (every element is a capability and the other top-level fields are ignored),
+    so a benign-looking top-level cannot be allowed to stand in for what is inside.
+    """
+    if isinstance(data, dict) and "capabilities" in data:
+        problems = []
+        elements = data["capabilities"]
+        if not isinstance(elements, list):
+            return [f"{label}: `capabilities` must be a list"]
+        for index, element in enumerate(elements):
+            if isinstance(element, str):
+                continue  # a reference to another capability by identifier
+            problems.extend(check_capability(f"{label} capabilities[{index}]", element))
+        return problems
     problems: list[str] = []
     if not isinstance(data, dict):
         return [f"{label}: a capability must be an object"]
@@ -277,8 +323,14 @@ def check_capability(label: str, data: object) -> list[str]:
     if not isinstance(windows, list) or not windows or not set(windows) <= ALLOWED_CAPABILITY_WINDOWS:
         problems.append(f"{label}: windows must be an explicit subset of {sorted(ALLOWED_CAPABILITY_WINDOWS)}")
     webviews = data.get("webviews")
-    if webviews is not None and (not isinstance(webviews, list) or "*" in webviews):
-        problems.append(f"{label}: webviews must be explicit, not a wildcard")
+    if webviews is not None and (
+        not isinstance(webviews, list)
+        or any(not isinstance(w, str) or not w or GLOB_CHARS & set(w) for w in webviews)
+    ):
+        problems.append(f"{label}: webviews must be explicit names, not patterns")
+    # Window labels are matched as globs too.
+    if isinstance(windows, list) and any(not isinstance(w, str) or GLOB_CHARS & set(w) for w in windows):
+        problems.append(f"{label}: window labels must be explicit names, not patterns")
     return problems
 
 
@@ -303,7 +355,9 @@ def check_config(repo: Path) -> list[str]:
         elif not isinstance(entry, str):
             fail(problems, f"{conf_path}: inline capability #{index} is neither a name nor an object")
 
-    for cap in sorted(cap_dir.glob("*")) if cap_dir.exists() else []:
+    # Tauri reads capability files from capabilities/** (recursively) and merges
+    # platform-specific and JSON5/TOML configs over tauri.conf.json.
+    for cap in sorted(cap_dir.rglob("*")) if cap_dir.exists() else []:
         if not cap.is_file():
             continue
         label = str(cap.relative_to(repo))
@@ -317,18 +371,56 @@ def check_config(repo: Path) -> list[str]:
             continue
         for message in check_capability(label, data):
             fail(problems, message)
+
+    tauri_dir = repo / "src-tauri"
+    for other in sorted(tauri_dir.glob("*")):
+        name = other.name.lower()
+        if other.is_file() and name != "tauri.conf.json" and re.fullmatch(r"tauri(\..+)?\.conf\.json5?|tauri(\..+)?\.toml", name):
+            fail(
+                problems,
+                f"{other.relative_to(repo)}: Tauri merges this over tauri.conf.json and this guard "
+                "reads only tauri.conf.json; fold it in or extend the guard first",
+            )
+    build_rs = tauri_dir / "build.rs"
+    sources = [build_rs] if build_rs.exists() else []
+    sources += sorted((tauri_dir / "src").rglob("*.rs")) if (tauri_dir / "src").exists() else []
+    for path in sources:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            fail(problems, f"{path.relative_to(repo)}: unreadable, so it cannot be checked for capability changes")
+            continue
+        if RUNTIME_CAPABILITY.search(text):
+            fail(
+                problems,
+                f"{path.relative_to(repo)}: capabilities are read from capabilities/ only; "
+                "add_capability and capabilities_path_pattern would load ones this guard never sees",
+            )
     return problems
 
 
 def iter_source_files(repo: Path):
+    # Everything that ends up in, or configures, the app. Dev tooling (scripts/,
+    # tools/) is not shipped and is covered by the other guards.
     roots = [repo / "crates", repo / "src-tauri" / "src", repo / "src-tauri" / "plugins",
-             repo / "src", repo / "static"]
+             repo / "src-tauri" / "gen", repo / "src", repo / "static"]
+    single_files = [repo / "src-tauri" / "build.rs", repo / "src-tauri" / "tauri.conf.json",
+                    repo / "vite.config.js", repo / "svelte.config.js"]
+
+    def wanted(path: Path) -> bool:
+        relative = path.relative_to(repo)
+        if set(relative.parts) & SKIP_DIRS:
+            return False
+        return not str(relative).startswith(SKIP_PATH_PREFIXES)
+
     for root in roots:
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
-            if path.is_file() and not (set(path.relative_to(repo).parts) & SKIP_DIRS):
-                yield path
+        if root.exists():
+            for path in sorted(root.rglob("*")):
+                if path.is_file() and wanted(path):
+                    yield path
+    for path in single_files:
+        if path.is_file():
+            yield path
 
 
 def check_source(repo: Path) -> list[str]:
@@ -338,11 +430,14 @@ def check_source(repo: Path) -> list[str]:
         suffix = path.suffix.lower()
         if suffix not in SOURCE_RULES and suffix not in URL_SCANNED:
             continue
+        label = str(path.relative_to(repo))
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
+            # A stray byte must not hide a whole file from the scan (compilers and
+            # bundlers tolerate it in comments).
+            fail(problems, f"{label}: not valid UTF-8, so it cannot be scanned")
             continue
-        label = str(path.relative_to(repo))
         problems.extend(guard_common.inline_marker_problems("\n".join(lines), label))
         rule = SOURCE_RULES.get(suffix)
         for number, line in enumerate(lines, 1):

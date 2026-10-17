@@ -17,5 +17,26 @@
    "reason": "`key` is a bool: whether db.key exists, not the key"
   }
  ],
- "offline_source": []
+ "offline_source": [
+  {
+   "file": "src-tauri/tauri.conf.json",
+   "contains": "\"$schema\": \"https://schema.tauri.app/config/2\"",
+   "reason": "JSON schema identifier for editors, never fetched at runtime"
+  },
+  {
+   "file": "vite.config.js",
+   "contains": "// https://vite.dev/config/",
+   "reason": "a documentation comment"
+  },
+  {
+   "file": "svelte.config.js",
+   "contains": "// See: https://svelte.dev/docs/kit/single-page-apps",
+   "reason": "a documentation comment"
+  },
+  {
+   "file": "svelte.config.js",
+   "contains": "// See: https://v2.tauri.app/start/frontend/sveltekit/ for more info",
+   "reason": "a documentation comment"
+  }
+ ]
 }

@@ -142,10 +142,15 @@ class ApkTests(unittest.TestCase):
         self.assertTrue(self.run_apk(permissions="", tree=""))
 
 
+# The directives that never fall back to default-src, so every policy must name them.
+REQUIRED = "base-uri 'none'; form-action 'none'; object-src 'none'; frame-ancestors 'none'"
+
+
 class CspTests(unittest.TestCase):
     GOOD = (
         "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
-        "img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+        "img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; "
+        "form-action 'none'; object-src 'none'; frame-ancestors 'none'"
     )
 
     def test_good_policy_passes(self):
@@ -167,7 +172,7 @@ class CspTests(unittest.TestCase):
     def test_unsafe_inline_only_for_styles(self):
         self.assertTrue(guard.check_csp("default-src 'self'; script-src 'self' 'unsafe-inline'"))
         self.assertTrue(guard.check_csp("default-src 'unsafe-inline'"))
-        self.assertEqual(guard.check_csp("default-src 'none'; style-src 'self' 'unsafe-inline'"), [])
+        self.assertEqual(guard.check_csp(f"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; {REQUIRED}"), [])
 
     def test_a_repeated_directive_is_refused_because_the_browser_obeys_the_first(self):
         # The first script-src is the remote one; a guard that kept the last would have passed this.
@@ -181,12 +186,28 @@ class CspTests(unittest.TestCase):
     def test_directive_names_and_keywords_are_case_insensitive(self):
         self.assertTrue(guard.check_csp("default-src 'none'; Script-Src https://evil.example"))
         self.assertTrue(guard.check_csp("DEFAULT-SRC 'none'; script-src 'SELF' 'Unsafe-Eval'"))
-        self.assertEqual(guard.check_csp("Default-Src 'NONE'; Script-Src 'Self'"), [])
+        self.assertEqual(guard.check_csp(f"Default-Src 'NONE'; Script-Src 'Self'; {REQUIRED}"), [])
 
     def test_the_map_form_is_judged_like_the_string_form(self):
-        good = {"default-src": "'none'", "script-src": ["'self'"], "connect-src": "ipc: http://ipc.localhost"}
+        good = {"default-src": "'none'", "script-src": ["'self'"], "connect-src": "ipc: http://ipc.localhost",
+                "base-uri": "'none'", "form-action": "'none'", "object-src": ["'none'"], "frame-ancestors": "'none'"}
         self.assertEqual(guard.check_csp(good), [])
         self.assertTrue(guard.check_csp({"default-src": "'none'", "script-src": ["https://evil.example"]}))
+
+    def test_data_and_ipc_sources_only_where_they_belong(self):
+        # data: in a script-src would allow scripts from data URLs.
+        self.assertTrue(any("script-src" in p and "data:" in p for p in guard.check_csp(self.GOOD.replace("script-src 'self'", "script-src 'self' data:"))))
+        self.assertTrue(guard.check_csp(self.GOOD.replace("default-src 'none'", "default-src 'none' data:")))
+        self.assertTrue(guard.check_csp(self.GOOD.replace("img-src 'self' data:", "img-src 'self' ipc:")))
+        # ...and where they belong they are fine.
+        self.assertEqual(guard.check_csp(self.GOOD.replace("font-src", "font-src")), [])
+        self.assertEqual(guard.check_csp(self.GOOD + "; font-src 'self' data:"), [])
+
+    def test_directives_that_do_not_fall_back_must_be_present(self):
+        for name in ("base-uri 'none'", "form-action 'none'", "object-src 'none'", "frame-ancestors 'none'"):
+            weakened = self.GOOD.replace("; " + name, "")
+            self.assertNotEqual(weakened, self.GOOD, name)
+            self.assertTrue(any(name.split()[0] in p for p in guard.check_csp(weakened)), name)
 
     def test_unsafe_eval_fails(self):
         self.assertTrue(guard.check_csp("default-src 'self'; script-src 'self' 'unsafe-eval'"))
@@ -287,6 +308,85 @@ class RepoTests(unittest.TestCase):
             bad = self.make_repo(tmp, capabilities=[{
                 "identifier": "inline", "windows": ["main"], "permissions": ["core:default", "http:default"]}])
             self.assertTrue(any("inline capability" in p for p in guard.check_config(bad)))
+
+    def test_capability_files_in_subdirectories_are_read_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            nested = repo / "src-tauri" / "capabilities" / "x" / "y"
+            nested.mkdir(parents=True)
+            (nested / "evil.json").write_text(json.dumps({"windows": ["main"], "permissions": ["fs:default"]}))
+            self.assertTrue(any("fs:default" in p for p in guard.check_config(repo)))
+
+    def test_a_capabilities_list_is_judged_by_what_is_inside_it(self):
+        # Tauri ignores the other top-level fields of such a file; a benign top level
+        # must not stand in for the list.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            self.cap(repo, "named.json", json.dumps({
+                "windows": ["main"], "permissions": ["core:default"],
+                "capabilities": [{"identifier": "evil", "windows": ["main"], "permissions": ["shell:default"]}],
+            }))
+            self.assertTrue(any("shell:default" in p for p in guard.check_config(repo)))
+            self.cap(repo, "named.json", json.dumps({"capabilities": [
+                {"identifier": "ok", "windows": ["main"], "permissions": ["core:default"]}, "default"]}))
+            self.assertEqual(guard.check_config(repo), [])
+            self.cap(repo, "named.json", json.dumps({"capabilities": "oops"}))
+            self.assertTrue(guard.check_config(repo))
+
+    def test_configs_that_tauri_merges_over_the_main_one_are_refused(self):
+        for name in ("tauri.android.conf.json", "tauri.conf.json5", "Tauri.toml", "tauri.linux.conf.json", "Tauri.android.toml"):
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = self.make_repo(tmp)
+                (repo / "src-tauri" / name).write_text('{"app": {"security": {"csp": null}}}')
+                self.assertTrue(any(name.lower() in p.lower() for p in guard.check_config(repo)), name)
+
+    def test_runtime_capability_loading_is_refused_in_build_scripts_and_code(self):
+        for rel, text in (
+            ("src-tauri/build.rs", 'tauri_build::try_build(Attributes::new().capabilities_path_pattern("x/**/*"));'),
+            ("src-tauri/src/lib.rs", "app.add_capability(r#\"{}\"#)?;"),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = self.make_repo(tmp)
+                path = repo / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                self.assertTrue(any("capabilit" in p for p in guard.check_config(repo)), rel)
+
+    def test_window_and_webview_labels_must_be_names_not_patterns(self):
+        for key, value in (("webviews", ["*"]), ("webviews", ["**"]), ("webviews", ["?*"]), ("webviews", ["[!z]*"]),
+                           ("windows", ["m*"]), ("windows", ["main", "{a,b}"])):
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = self.make_repo(tmp)
+                data = {"windows": ["main"], "permissions": ["core:default"], key: value}
+                self.cap(repo, "w.json", json.dumps(data))
+                self.assertTrue(guard.check_config(repo), (key, value))
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            self.cap(repo, "w.json", json.dumps({"windows": ["main"], "webviews": ["main-view"], "permissions": ["core:default"]}))
+            self.assertEqual(guard.check_config(repo), [])
+
+    def test_a_file_that_is_not_utf8_is_reported_not_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            (repo / "src" / "a.ts").write_bytes(b"// \xff\nfetch('/x')\n")
+            problems = guard.check_source(repo)
+            self.assertTrue(any("not valid UTF-8" in p for p in problems), problems)
+
+    def test_the_other_script_suffixes_and_kotlin_in_gen_are_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self.make_repo(tmp)
+            (repo / "src" / "a.mjs").write_text("fetch('/x')\n")
+            (repo / "src" / "b.tsx").write_text("new WebSocket('x')\n")
+            kt = repo / "src-tauri" / "gen" / "android" / "app" / "src" / "main" / "java"
+            kt.mkdir(parents=True)
+            (kt / "MainActivity.kt").write_text("val c: HttpsURLConnection\n")
+            problems = guard.check_source(repo)
+            self.assertEqual(len([p for p in problems if "network API" in p]), 3, problems)
+            # Build output under gen/ is still skipped.
+            out = repo / "src-tauri" / "gen" / "android" / "app" / "build"
+            out.mkdir(parents=True)
+            (out / "Gen.kt").write_text("val c: HttpsURLConnection\n")
+            self.assertEqual(len([p for p in guard.check_source(repo) if "network API" in p]), 3)
 
     def test_flags_that_widen_the_webview_are_refused(self):
         for flag in ("dangerousDisableAssetCspModification", "dangerousRemoteDomainIpcAccess"):
