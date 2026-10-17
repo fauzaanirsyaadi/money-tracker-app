@@ -488,12 +488,26 @@ pub fn blob_alias_version(blob: &[u8]) -> Option<u8> {
 }
 
 /// Removes aliases older than the one `db.key` uses, after a successful open.
-/// Best effort; only runs when the pair is settled (no swap markers).
+///
+/// Deleting a Keystore key cannot be undone, so this is deliberately timid. It
+/// does nothing unless **all** of these hold:
+/// * `db.key` is readable and its first byte names an alias version;
+/// * the blob actually unwraps to a 32-byte key (which proves that alias exists
+///   and works: a garbage first byte such as 200 would otherwise make "older
+///   than 200" mean every alias);
+/// * no swap marker (`*.old`, `db.key.new`) is present, i.e. the pair is settled.
 pub fn prune_stale_aliases(dir: &Path, keys: &dyn KeyBackend) {
     let Ok(blob) = fs::read(dir.join(KEY_FILE)) else {
         return;
     };
-    if let Some(version) = blob_alias_version(&blob) {
+    let Some(version) = blob_alias_version(&blob) else {
+        return;
+    };
+    let proven = keys.unwrap(&blob).is_ok_and(|plain| plain.len() == 32);
+    let settled = ["money.db.old", "db.key.old", "db.key.new"]
+        .iter()
+        .all(|name| matches!(fs::exists(dir.join(name)), Ok(false)));
+    if proven && settled {
         keys.prune_below(version);
     }
 }
@@ -1441,5 +1455,80 @@ mod tests {
         assert_eq!(blob_alias_version(&[3, 1, 2]), Some(3));
         assert_eq!(blob_alias_version(&[0, 1, 2]), None);
         assert_eq!(blob_alias_version(&[]), None);
+    }
+
+    // --- pruning never deletes a key that might still be needed (review item 1) ----
+
+    /// `FakeKeys` blobs wrap a 32-byte key, as the real ones do.
+    fn settled_pair(tag: &str, aliases: &[u8]) -> (TempDir, FakeKeys) {
+        let dir = TempDir::new(tag);
+        let keys = FakeKeys::default();
+        for version in aliases {
+            keys.aliases
+                .borrow_mut()
+                .insert(*version, version.wrapping_mul(31).wrapping_add(7));
+        }
+        let newest = *aliases.last().unwrap();
+        fs::write(dir.0.join(KEY_FILE), keys.blob(newest, &[7u8; 32])).unwrap();
+        (dir, keys)
+    }
+
+    #[test]
+    fn the_alias_the_blob_names_is_never_deleted_and_older_ones_go_only_when_proven() {
+        let (dir, keys) = settled_pair("prune-proven", &[1, 2, 3]);
+        prune_stale_aliases(&dir.0, &keys);
+        assert_eq!(
+            keys.versions(),
+            vec![3],
+            "only the proven newest alias is kept"
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_unreadable_prefix_prunes_nothing_at_all() {
+        // The blob names alias 200, which does not exist: "older than 200" must not mean all.
+        let (dir, keys) = settled_pair("prune-unknown", &[1, 2]);
+        fs::write(dir.0.join(KEY_FILE), {
+            let mut blob = keys.blob(2, &[7u8; 32]);
+            blob[0] = 200;
+            blob
+        })
+        .unwrap();
+        prune_stale_aliases(&dir.0, &keys);
+        assert_eq!(
+            keys.versions(),
+            vec![1, 2],
+            "nothing may be deleted on an unproven prefix"
+        );
+
+        // Version zero, an empty file and a missing file.
+        for content in [Some(vec![0u8, 1, 2, 3]), Some(vec![]), None] {
+            let (dir, keys) = settled_pair("prune-unreadable", &[1, 2]);
+            match content {
+                Some(bytes) => fs::write(dir.0.join(KEY_FILE), bytes).unwrap(),
+                None => fs::remove_file(dir.0.join(KEY_FILE)).unwrap(),
+            }
+            prune_stale_aliases(&dir.0, &keys);
+            assert_eq!(keys.versions(), vec![1, 2]);
+        }
+    }
+
+    #[test]
+    fn a_blob_that_does_not_unwrap_prunes_nothing() {
+        let (dir, keys) = settled_pair("prune-garbled", &[1, 2]);
+        // The prefix is right (2) but the body is too short to be a 32-byte key.
+        fs::write(dir.0.join(KEY_FILE), [2u8, 9, 9]).unwrap();
+        prune_stale_aliases(&dir.0, &keys);
+        assert_eq!(keys.versions(), vec![1, 2]);
+    }
+
+    #[test]
+    fn an_unsettled_swap_prunes_nothing() {
+        for marker in ["money.db.old", "db.key.old", "db.key.new"] {
+            let (dir, keys) = settled_pair("prune-unsettled", &[1, 2]);
+            fs::write(dir.0.join(marker), b"x").unwrap();
+            prune_stale_aliases(&dir.0, &keys);
+            assert_eq!(keys.versions(), vec![1, 2], "{marker}");
+        }
     }
 }
