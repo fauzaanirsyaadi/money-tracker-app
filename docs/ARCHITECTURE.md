@@ -1155,7 +1155,7 @@ Catatan jujur: SHA di atas diambil dari `git ls-remote` ke repositori masing-mas
 | Satu kategori (dengan anak) | 12 ms | sama | dua pencarian indeks digabung lalu disortir (diterima) |
 | Pencarian teks `LIKE '%x%'` | 21 ms | sama | pemindaian (diterima, tidak ada indeks yang membantu) |
 | Daftar rekening (saldo per rekening) | 33,5 ms | **3,0 ms** | migrasi 0003: indeks penutup `(account_id, amount_minor)` |
-| Kekayaan bersih | 33 ms | ~3 ms | memakai saldo yang sama |
+| Kekayaan bersih | 33 ms | ~3 ms (sama dengan daftar rekening, tidak diukur terpisah) | memakai saldo yang sama |
 | Laporan pengeluaran, sebulan / setahun | 1,1 / 13 ms | sama | `idx_tx_date` |
 | Tren 12 bulan | 26 ms | sama | `idx_tx_date` |
 
