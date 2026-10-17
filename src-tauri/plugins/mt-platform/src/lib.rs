@@ -39,7 +39,6 @@ pub enum BiometricAvailability {
 /// What a fingerprint/face enrolment produced: a random token, known to the
 /// native side and to Rust only, and that token sealed under the biometric key.
 /// Rust keeps the blob and a hash of the token, never the token itself.
-// debug-safe: carries a secret token, so Debug is written by hand and prints neither field
 pub struct Enrollment {
     pub token: Zeroizing<Vec<u8>>,
     pub blob: Vec<u8>,
@@ -51,7 +50,6 @@ impl fmt::Debug for Enrollment {
     }
 }
 
-// debug-safe: Enrolled carries an Enrollment, whose Debug is redacted
 #[derive(Debug)]
 pub enum EnrollOutcome {
     Enrolled(Enrollment),
@@ -61,7 +59,6 @@ pub enum EnrollOutcome {
     Failed,
 }
 
-// debug-safe: Token holds a Zeroizing buffer, printed as redacted by hand below
 pub enum UnlockOutcome {
     /// The key opened after a real biometric: this is the token it released.
     Token(Zeroizing<Vec<u8>>),

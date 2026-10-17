@@ -65,7 +65,6 @@ struct Outcome {
     outcome: String,
 }
 
-// debug-safe: no Debug derive; the token and blob stay out of any log
 #[derive(Deserialize)]
 struct BiometricReply {
     outcome: String,

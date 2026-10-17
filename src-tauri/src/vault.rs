@@ -88,7 +88,6 @@ impl From<tauri_plugin_mt_keystore::Error> for VaultError {
 }
 
 /// What exists in the data directory.
-// debug-safe: `key` is a bool: whether db.key exists
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirState {
     /// `money.db` exists and is not empty (or an interrupted restore left

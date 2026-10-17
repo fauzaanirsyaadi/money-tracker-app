@@ -7,8 +7,8 @@ Also checked: `#[cfg_attr(..., derive(Debug))]` and hand-written `impl Debug`
 (which must say it redacts). A derived `Debug` prints every field, so a stray `{:?}` or a failed assertion in
 a log could leak a balance or a note. Such types use `mt_core::redacted_debug!`
 (or a hand-written `Debug`) instead. A type that merely *looks* sensitive can be
-exempted with a `// debug-safe: <reason>` comment on one of the three lines
-above its `derive`.
+exempted by an entry (with a reason) in `scripts/guard_exceptions.json`. Inline
+`// debug-safe:` comments are not honoured; see `scripts/guard_common.py`.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+
+import guard_common
 
 SKIP_DIRS = {"target", "node_modules", ".git", "build", "gen", "tests"}
 
@@ -110,9 +112,11 @@ def type_body(text: str, name: str) -> str | None:
     return payloads(body) if "enum" in match.group(0) and body else body
 
 
-def check_text(text: str, label: str) -> list[str]:
-    problems: list[str] = []
-    lines = text.split("\n")
+def check_text(
+    text: str, label: str, exceptions: guard_common.Exceptions | None = None
+) -> list[str]:
+    exceptions = exceptions or guard_common.Exceptions()
+    problems: list[str] = guard_common.inline_marker_problems(text, label)
     derive_matches = list(DERIVE.finditer(text)) + list(CFG_ATTR_DERIVE.finditer(text))
     for match in derive_matches:
         derives = [d.strip() for d in match.group(1).split(",")]
@@ -122,8 +126,7 @@ def check_text(text: str, label: str) -> list[str]:
         if not item:
             continue
         line_no = text.count("\n", 0, match.start())
-        context = "\n".join(lines[max(0, line_no - 3) : line_no + 1])
-        if "debug-safe" in context:
+        if exceptions.allows("debug_redaction", file=label, type=item.group(2)):
             continue
         body = strip_comments(body_after(text, item.end()))
         if item.group(1) == "enum":
@@ -132,17 +135,16 @@ def check_text(text: str, label: str) -> list[str]:
             problems.append(
                 f"DEBUG-REDACTION FAIL: {label}:{line_no + 1}: `{item.group(2)}` derives Debug "
                 "but has fields that may hold money, names or notes; use mt_core::redacted_debug! "
-                "or add `// debug-safe: <reason>`"
+                "or list the type with a reason in scripts/guard_exceptions.json"
             )
     # Hand-written Debug on a type with sensitive fields must say it redacts.
     for impl in MANUAL_DEBUG.finditer(text):
         name = impl.group(1)
         line_no = text.count("\n", 0, impl.start())
-        context = "\n".join(lines[max(0, line_no - 3) : line_no + 1])
-        if "debug-safe" in context:
-            continue
         fields = type_body(text, name)
         if fields is None or not is_sensitive(fields):
+            continue
+        if exceptions.allows("debug_redaction", file=label, type=name):
             continue
         body = body_after(text, impl.end())
         if "redacted" not in body.lower():
@@ -154,11 +156,13 @@ def check_text(text: str, label: str) -> list[str]:
 
 
 def check_repo(repo: Path) -> list[str]:
-    problems: list[str] = []
+    exceptions = guard_common.load(repo)
+    problems: list[str] = list(exceptions.problems)
     for path in sorted(repo.rglob("*.rs")):
         if any(part in SKIP_DIRS for part in path.relative_to(repo).parts):
             continue
-        problems.extend(check_text(path.read_text(), str(path.relative_to(repo))))
+        problems.extend(check_text(path.read_text(), str(path.relative_to(repo)), exceptions))
+    problems.extend(exceptions.unused(("debug_redaction",)))
     return problems
 
 

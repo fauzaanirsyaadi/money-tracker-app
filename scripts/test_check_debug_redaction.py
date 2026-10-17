@@ -3,8 +3,17 @@ import unittest
 import check_debug_redaction as guard
 
 
-def problems(source: str) -> list[str]:
-    return guard.check_text(source, "x.rs")
+import guard_common
+
+
+def problems(source: str, exceptions=None) -> list[str]:
+    return guard.check_text(source, "x.rs", exceptions)
+
+
+def listed(*types: str) -> guard_common.Exceptions:
+    ex = guard_common.Exceptions()
+    ex.entries["debug_redaction"] = [{"file": "x.rs", "type": t, "reason": "test"} for t in types]
+    return ex
 
 
 class DebugRedactionTests(unittest.TestCase):
@@ -22,9 +31,20 @@ class DebugRedactionTests(unittest.TestCase):
         self.assertEqual(problems("#[derive(Clone)]\npub struct T { pub amount_minor: i64 }"), [])
         self.assertEqual(problems("#[derive(Debug)]\npub struct Cursor { id: i64, date: String }"), [])
 
-    def test_the_exemption_comment_works_within_three_lines(self):
+    def test_a_listed_exception_exempts_exactly_that_type_in_that_file(self):
+        src = "#[derive(Debug)]\npub struct T { pub total_rows: u32 }"
+        self.assertEqual(len(problems(src)), 1)
+        self.assertEqual(problems(src, listed("T")), [])
+        self.assertEqual(len(problems(src, listed("Other"))), 1)
+        other_file = listed("T")
+        other_file.entries["debug_redaction"][0]["file"] = "y.rs"
+        self.assertEqual(len(problems(src, other_file)), 1)
+
+    def test_the_inline_comment_is_not_honoured_and_is_reported(self):
         src = "// debug-safe: counts only\n#[derive(Debug)]\npub struct T { pub total_rows: u32 }"
-        self.assertEqual(problems(src), [])
+        found = problems(src)
+        self.assertTrue(any("inline exemption" in p for p in found), found)
+        self.assertTrue(any("derives Debug" in p for p in found), found)
 
     def test_comments_do_not_trigger_it(self):
         src = "#[derive(Debug)]\npub struct T {\n    // the amount of retries\n    pub tries: u32,\n}"
@@ -71,8 +91,8 @@ class DebugRedactionTests(unittest.TestCase):
         # A type without sensitive fields may print itself however it likes.
         plain = "struct Plain { count: u32 }\nimpl fmt::Debug for Plain { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, \"{}\", self.count) } }"
         self.assertEqual(problems(plain), [])
-        # The exemption comment works here too.
-        self.assertEqual(problems("// debug-safe: counts\n" + leaky), [])
+        # A listed exception works here too.
+        self.assertEqual(problems(leaky, listed("Wrapped")), [])
 
     def test_the_repository_itself_is_clean(self):
         from pathlib import Path

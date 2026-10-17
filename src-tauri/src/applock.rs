@@ -38,7 +38,6 @@ const FORMAT: u32 = 1;
 /// earlier, the moment the picker returns or is cancelled.
 pub const EXTERNAL_UI_MAX: Duration = Duration::from_secs(60);
 
-// debug-safe: InvalidPin carries a PinProblem category (too short, not digits), never the PIN
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockError {
     /// No PIN has been set.

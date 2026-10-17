@@ -17,3 +17,10 @@ Personal finance app. Android first, local-only mode. Stack: Tauri 2, Rust, Svel
   verified.
 - Destructive actions require the PIN when lock.json is valid and readable, plus a typed
   confirmation.
+
+## CI guards: exceptions live in one place
+
+- A guard (`scripts/check_*.py`) is only ever told to look away through `scripts/guard_exceptions.json`, with a reason. Inline marker comments (`debug-safe:`, `offline-check: allow`) are refused and reported.
+- Tauri capabilities are an allow-list (`ALLOWED_CAPABILITY_PERMISSIONS` in `scripts/check_offline.py`), read from `.json`, `.json5`, `.toml` files and inline in `tauri.conf.json`. A permission that is not listed fails CI; a file the guard cannot parse fails CI.
+- Every GitHub Action is pinned to a full commit SHA (`scripts/check_workflows.py`). Bump a pin on purpose, with the tag in the trailing comment.
+- `.github/CODEOWNERS` covers the workflows, `scripts/`, the exceptions file and `deny.toml`.

@@ -22,7 +22,6 @@ const OLD_SUFFIX: &str = ".old";
 /// Files that make up one SQLite database.
 const COMPANIONS: [&str; 3] = ["", "-wal", "-shm"];
 
-// debug-safe: WeakPassphrase carries a PassphraseProblem category, never the passphrase
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupFailure {
     /// The passphrase is not acceptable for a new backup.

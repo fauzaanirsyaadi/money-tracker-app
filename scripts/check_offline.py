@@ -3,7 +3,7 @@
 
     check_offline.py manifest <AndroidManifest.xml>   release manifest rules
     check_offline.py apk <app.apk> [aapt2]            the same rules on the built APK
-    check_offline.py config   [repo_root]             CSP and Tauri capabilities
+    check_offline.py config   [repo_root]             CSP and Tauri capabilities (allow-list)
     check_offline.py source   [repo_root]             no network APIs or URLs in our code
 
 Exits 1 with one "OFFLINE-GUARD FAIL" line per violation. Network-capable
@@ -17,9 +17,12 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import guard_common
 
 ANDROID = "{http://schemas.android.com/apk/res/android}"
 
@@ -39,7 +42,15 @@ ALLOWED_PERMISSIONS = {
 SAFE_CSP_SOURCES = {"'self'", "'none'", "data:", "ipc:", "http://ipc.localhost"}
 UNSAFE_INLINE_ONLY_IN = {"style-src", "style-src-elem", "style-src-attr"}
 
-FORBIDDEN_CAPABILITY_PREFIXES = ("http:", "websocket:", "shell:", "opener:", "updater:")
+# The only permissions a capability may grant. An allow-list on purpose: a
+# deny-list of "dangerous" prefixes passes every plugin nobody thought of. Adding
+# an entry needs the feature that uses it and a note in docs/ARCHITECTURE.md.
+ALLOWED_CAPABILITY_PERMISSIONS = {"core:default"}
+ALLOWED_CAPABILITY_WINDOWS = {"main"}
+# Tauri reads capability files in these formats; each one is parsed here.
+CAPABILITY_SUFFIXES = {".json", ".json5", ".toml"}
+# Settings in tauri.conf.json that widen what the WebView may reach.
+FORBIDDEN_SECURITY_FLAGS = ("dangerousDisableAssetCspModification", "dangerousRemoteDomainIpcAccess")
 
 SOURCE_RULES = {
     ".rs": re.compile(
@@ -55,7 +66,6 @@ URL = re.compile(r"https?://", re.IGNORECASE)
 URL_ALLOWED = ("http://www.w3.org/",)  # XML/SVG namespaces, not requests
 URL_SCANNED = {".svelte", ".ts", ".js", ".html", ".css", ".svg", ".json"}
 SKIP_DIRS = {"node_modules", "target", "build", ".svelte-kit", "gen", ".git", "dist"}
-ALLOW_MARK = "offline-check: allow"
 
 
 def fail(problems: list[str], message: str) -> None:
@@ -154,15 +164,38 @@ def check_apk(apk: Path, aapt2: str = "aapt2", run=_aapt2, libs=_native_libs) ->
     return problems
 
 
+def _csp_text(csp: object) -> str | None:
+    """The policy as one string. Tauri also accepts a map of directive -> sources."""
+    if isinstance(csp, str):
+        return csp
+    if isinstance(csp, dict):
+        parts = []
+        for name, value in csp.items():
+            sources = value if isinstance(value, str) else " ".join(map(str, value)) if isinstance(value, list) else ""
+            parts.append(f"{name} {sources}")
+        return "; ".join(parts)
+    return None
+
+
 def check_csp(csp: object) -> list[str]:
     problems: list[str] = []
-    if not isinstance(csp, str) or not csp.strip():
+    text = _csp_text(csp)
+    if text is None or not text.strip():
         return ["app.security.csp must be a non-empty string (null disables the CSP)"]
+    # Directive names and source keywords are case-insensitive. When a directive is
+    # repeated the browser obeys the FIRST one and ignores the rest, so a repeat is
+    # refused outright: judging only the last one would approve a policy the
+    # browser reads differently.
     directives: dict[str, list[str]] = {}
-    for part in csp.split(";"):
+    for part in text.split(";"):
         tokens = part.split()
-        if tokens:
-            directives[tokens[0]] = tokens[1:]
+        if not tokens:
+            continue
+        name = tokens[0].lower()
+        if name in directives:
+            problems.append(f"CSP repeats {name}; browsers obey only the first, so repeats are refused")
+            continue
+        directives[name] = [token.lower() for token in tokens[1:]]
     if "default-src" not in directives:
         problems.append("CSP has no default-src")
     for name, sources in directives.items():
@@ -178,21 +211,112 @@ def check_csp(csp: object) -> list[str]:
     return problems
 
 
+def _json5_lite(text: str) -> object:
+    """Strict JSON plus the two JSON5 conveniences we tolerate: comments and trailing commas.
+
+    Anything else JSON5 allows (unquoted keys, single quotes, ...) is not parsed:
+    the file is reported as unverifiable, which fails the guard rather than
+    letting a capability through unread.
+    """
+    out, i, in_string = [], 0, False
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\":
+                out.append(text[i + 1 : i + 2])
+                i += 1
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif text.startswith("//", i):
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 1
+        else:
+            out.append(ch)
+        i += 1
+    return json.loads(re.sub(r",(\s*[}\]])", r"\1", "".join(out)))
+
+
+def _load_capability(path: Path) -> dict:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".toml":
+        return tomllib.loads(text)
+    if path.suffix == ".json5":
+        return _json5_lite(text)
+    return json.loads(text)
+
+
+def check_capability(label: str, data: object) -> list[str]:
+    """One capability (a file's contents, or an inline object in tauri.conf.json)."""
+    problems: list[str] = []
+    if not isinstance(data, dict):
+        return [f"{label}: a capability must be an object"]
+    permissions = data.get("permissions")
+    if not isinstance(permissions, list):
+        problems.append(f"{label}: capability has no permissions list to verify")
+        permissions = []
+    for permission in permissions:
+        name = permission if isinstance(permission, str) else (
+            permission.get("identifier", "") if isinstance(permission, dict) else ""
+        )
+        if name not in ALLOWED_CAPABILITY_PERMISSIONS:
+            problems.append(f"{label}: permission {name!r} is not on the allow-list")
+        if isinstance(permission, dict) and ("allow" in permission or "deny" in permission):
+            problems.append(f"{label}: permission {name!r} carries a scope; scopes are not allowed")
+    for key in ("remote", "urls"):
+        if data.get(key):
+            problems.append(f"{label}: remote capabilities ({key}) are not allowed")
+    windows = data.get("windows", [])
+    if not isinstance(windows, list) or not windows or not set(windows) <= ALLOWED_CAPABILITY_WINDOWS:
+        problems.append(f"{label}: windows must be an explicit subset of {sorted(ALLOWED_CAPABILITY_WINDOWS)}")
+    webviews = data.get("webviews")
+    if webviews is not None and (not isinstance(webviews, list) or "*" in webviews):
+        problems.append(f"{label}: webviews must be explicit, not a wildcard")
+    return problems
+
+
 def check_config(repo: Path) -> list[str]:
     problems: list[str] = []
     conf_path = repo / "src-tauri" / "tauri.conf.json"
     conf = json.loads(conf_path.read_text())
-    for message in check_csp(conf.get("app", {}).get("security", {}).get("csp")):
+    security = conf.get("app", {}).get("security", {})
+    for message in check_csp(security.get("csp")):
         fail(problems, f"{conf_path}: {message}")
+    for flag in FORBIDDEN_SECURITY_FLAGS:
+        if security.get(flag):
+            fail(problems, f"{conf_path}: app.security.{flag} must not be set")
 
-    for cap in sorted((repo / "src-tauri" / "capabilities").glob("*.json")):
-        data = json.loads(cap.read_text())
-        for permission in data.get("permissions", []):
-            name = permission if isinstance(permission, str) else permission.get("identifier", "")
-            if name.startswith(FORBIDDEN_CAPABILITY_PREFIXES):
-                fail(problems, f"{cap}: capability {name!r} grants network or process access")
-        if data.get("remote"):
-            fail(problems, f"{cap}: remote capabilities are not allowed")
+    # Inline capabilities in tauri.conf.json: objects are checked like files;
+    # strings name a capability file, which must exist.
+    cap_dir = repo / "src-tauri" / "capabilities"
+    for index, entry in enumerate(security.get("capabilities", []) or []):
+        if isinstance(entry, dict):
+            for message in check_capability(f"{conf_path} inline capability #{index}", entry):
+                fail(problems, message)
+        elif not isinstance(entry, str):
+            fail(problems, f"{conf_path}: inline capability #{index} is neither a name nor an object")
+
+    for cap in sorted(cap_dir.glob("*")) if cap_dir.exists() else []:
+        if not cap.is_file():
+            continue
+        label = str(cap.relative_to(repo))
+        if cap.suffix not in CAPABILITY_SUFFIXES:
+            fail(problems, f"{label}: unrecognised capability file type; cannot verify it")
+            continue
+        try:
+            data = _load_capability(cap)
+        except (ValueError, OSError) as err:
+            fail(problems, f"{label}: cannot be parsed, so it cannot be verified ({err})")
+            continue
+        for message in check_capability(label, data):
+            fail(problems, message)
     return problems
 
 
@@ -208,7 +332,8 @@ def iter_source_files(repo: Path):
 
 
 def check_source(repo: Path) -> list[str]:
-    problems: list[str] = []
+    exceptions = guard_common.load(repo)
+    problems: list[str] = list(exceptions.problems)
     for path in iter_source_files(repo):
         suffix = path.suffix.lower()
         if suffix not in SOURCE_RULES and suffix not in URL_SCANNED:
@@ -217,15 +342,18 @@ def check_source(repo: Path) -> list[str]:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
             continue
+        label = str(path.relative_to(repo))
+        problems.extend(guard_common.inline_marker_problems("\n".join(lines), label))
         rule = SOURCE_RULES.get(suffix)
         for number, line in enumerate(lines, 1):
-            if ALLOW_MARK in line:
+            if exceptions.allows("offline_source", file=label, contains=line):
                 continue
             if rule and rule.search(line):
-                fail(problems, f"{path.relative_to(repo)}:{number}: network API in code: {line.strip()[:80]}")
+                fail(problems, f"{label}:{number}: network API in code: {line.strip()[:80]}")
             if suffix in URL_SCANNED and URL.search(line):
                 if not any(allowed in line for allowed in URL_ALLOWED):
-                    fail(problems, f"{path.relative_to(repo)}:{number}: remote URL: {line.strip()[:80]}")
+                    fail(problems, f"{label}:{number}: remote URL: {line.strip()[:80]}")
+    problems.extend(exceptions.unused(("offline_source",)))
     return problems
 
 

@@ -1,0 +1,21 @@
+{
+ "comment": "The only place a CI guard may be told to look away (see scripts/guard_common.py). Each entry needs a reason; an entry that matches nothing fails CI. Protected by CODEOWNERS: changes here need the owner's approval.",
+ "debug_redaction": [
+  {
+   "file": "src-tauri/src/applock.rs",
+   "type": "LockError",
+   "reason": "InvalidPin carries a PinProblem category (too short, not digits), never the PIN itself"
+  },
+  {
+   "file": "src-tauri/src/backup.rs",
+   "type": "BackupFailure",
+   "reason": "WeakPassphrase carries a PassphraseProblem category, never the passphrase"
+  },
+  {
+   "file": "src-tauri/src/vault.rs",
+   "type": "DirState",
+   "reason": "`key` is a bool: whether db.key exists, not the key"
+  }
+ ],
+ "offline_source": []
+}
