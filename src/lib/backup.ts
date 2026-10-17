@@ -6,24 +6,47 @@ import type { ErrorCode } from "./api";
 export const PASSPHRASE_MIN = 12;
 export const PASSPHRASE_MAX = 128;
 
-function judge(text: string): string | null {
+/** What the backend would say; the strings are `PassphraseProblem` in `crates/backup`. */
+export type PassphraseVerdict = "ok" | "too_short" | "too_long" | "too_repetitive";
+
+function judgeOne(text: string): PassphraseVerdict {
   const chars = [...text];
-  if (chars.length < PASSPHRASE_MIN) {
-    return `Frasa sandi minimal ${PASSPHRASE_MIN} karakter (sekarang ${chars.length}).`;
-  }
-  if (chars.length > PASSPHRASE_MAX) return `Frasa sandi maksimal ${PASSPHRASE_MAX} karakter.`;
-  if (chars.every((c) => c === chars[0])) return "Frasa sandi terlalu mudah ditebak.";
-  return null;
+  if (chars.length < PASSPHRASE_MIN) return "too_short";
+  if (chars.length > PASSPHRASE_MAX) return "too_long";
+  if (chars.every((c) => c === chars[0])) return "too_repetitive";
+  return "ok";
 }
 
 /**
- * Why `passphrase` cannot protect a new backup, or null when it can. Judged on
- * the text as typed **and** on its NFKC form (what the backup hashes); the
- * stricter result wins, exactly like the backend. NFKC can expand one character
- * into many (U+FDFD gives 18), so the normalised length alone is not enough.
+ * The same verdict as `validate_passphrase` in Rust, which is the authority:
+ * the text as typed **and** its NFKC form (what the backup hashes) are both
+ * judged and the stricter wins, "too short" before anything else, otherwise the
+ * verdict on the text as typed. NFKC can expand one character into many (U+FDFA
+ * gives 18) or shrink decomposed text, so neither form alone is enough. This is
+ * advice while typing; the backend decides.
+ * `src/lib/backup.test.ts` runs the shared vectors in `testdata/`.
  */
+export function passphraseVerdict(passphrase: string): PassphraseVerdict {
+  const raw = judgeOne(passphrase);
+  const folded = judgeOne(passphrase.normalize("NFKC"));
+  if (raw === "ok") return folded;
+  if (folded === "ok") return raw;
+  if (raw === "too_short" || folded === "too_short") return "too_short";
+  return raw;
+}
+
+/** Why `passphrase` cannot protect a new backup, or null when it can. */
 export function passphraseProblem(passphrase: string): string | null {
-  return judge(passphrase) ?? judge(passphrase.normalize("NFKC"));
+  switch (passphraseVerdict(passphrase)) {
+    case "ok":
+      return null;
+    case "too_short":
+      return `Frasa sandi minimal ${PASSPHRASE_MIN} karakter (sekarang ${[...passphrase].length}).`;
+    case "too_long":
+      return `Frasa sandi maksimal ${PASSPHRASE_MAX} karakter.`;
+    case "too_repetitive":
+      return "Frasa sandi terlalu mudah ditebak.";
+  }
 }
 
 /** `money-tracker-YYYYMMDD.mtbak` from an ISO date (`YYYY-MM-DD`). */

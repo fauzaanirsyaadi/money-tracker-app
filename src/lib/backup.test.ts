@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -9,6 +10,7 @@ import {
   backupErrorMessage,
   backupFileName,
   passphraseProblem,
+  passphraseVerdict,
 } from "./backup.ts";
 
 test("short, long and repetitive passphrases are explained", () => {
@@ -89,4 +91,19 @@ test("never backed up: quiet at first, then a banner that says for how long", ()
   assert.equal(backupBanner(fresh, NOW), null);
   const old = { lastBackupAtMs: null, sinceMs: NOW - 9 * DAY };
   assert.match(backupBanner(old, NOW)!, /belum pernah dicadangkan \(9 hari sejak dipakai\)/);
+});
+
+// The same vectors run in Rust (crates/backup), which is the authority. Here the
+// UI's advice must never disagree with it.
+test("the shared passphrase vectors give the verdicts the backend gives", () => {
+  const file = new URL("../../testdata/passphrase_vectors.json", import.meta.url);
+  const { vectors } = JSON.parse(readFileSync(file, "utf8")) as {
+    vectors: { name: string; passphrase: string; verdict: string }[];
+  };
+  assert.ok(vectors.length >= 20);
+  for (const vector of vectors) {
+    assert.equal(passphraseVerdict(vector.passphrase), vector.verdict, vector.name);
+    // The message follows the verdict: advice exists exactly when the backend refuses.
+    assert.equal(passphraseProblem(vector.passphrase) === null, vector.verdict === "ok", vector.name);
+  }
 });

@@ -157,7 +157,7 @@ fn judge(passphrase: &str) -> Result<(), PassphraseProblem> {
 ///
 /// The rules are applied to **both** the text as typed and its NFKC form, and
 /// the stricter verdict wins. NFKC can *expand* a single compatibility
-/// character into many (U+FDFD becomes 18 characters, one ligature becomes
+/// character into many (U+FDFA becomes 18 characters, one ligature becomes
 /// three letters), so judging only the normalised text would let a one-to-four
 /// character passphrase through; and it can *shrink* decomposed text, so
 /// judging only the raw text would overcount.
@@ -894,5 +894,29 @@ mod tests {
         );
         // Characters, not bytes: 12 multi-byte characters qualify.
         assert_eq!(validate_passphrase("あいうえおかきくけこさし"), Ok(()));
+    }
+
+    /// The vectors shared with the UI (`src/lib/backup.test.ts`). This side is the
+    /// authority: the expected verdicts are written by hand in the file, and the
+    /// UI's advice is checked against the same list.
+    #[test]
+    fn shared_passphrase_vectors() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../../testdata/passphrase_vectors.json"))
+                .expect("the vector file is valid JSON");
+        let vectors = file["vectors"].as_array().expect("a vectors array");
+        assert!(vectors.len() >= 20);
+        for vector in vectors {
+            let name = vector["name"].as_str().expect("a name");
+            let passphrase = vector["passphrase"].as_str().expect("a passphrase");
+            let expected = match vector["verdict"].as_str().expect("a verdict") {
+                "ok" => Ok(()),
+                "too_short" => Err(PassphraseProblem::TooShort),
+                "too_long" => Err(PassphraseProblem::TooLong),
+                "too_repetitive" => Err(PassphraseProblem::Repetitive),
+                other => panic!("{name}: unknown verdict {other}"),
+            };
+            assert_eq!(validate_passphrase(passphrase), expected, "{name}");
+        }
     }
 }

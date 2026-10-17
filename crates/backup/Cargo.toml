@@ -21,5 +21,10 @@ unicode-normalization = "0.1"
 # Wipes derived keys and passphrase copies. Apache-2.0 OR MIT, RustCrypto, maintained.
 zeroize = "1"
 
+[dev-dependencies]
+# Reads the passphrase vectors shared with the UI (testdata/). Test scope only.
+# MIT OR Apache-2.0, maintained; already in the tree through the app.
+serde_json = "1"
+
 [lints]
 workspace = true
