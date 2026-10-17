@@ -2,7 +2,7 @@
 // On-device smoke test: installs the debug APK, then drives the quick-add flow
 // with real adb taps (FAB -> type 25000 -> Simpan) and asserts the saved row.
 //
-//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric] [--invalidate]
+//   node scripts/android_smoke.mjs [--apk PATH] [--no-install] [--serial ID] [--lock] [--biometric] [--invalidate] [--only-invalidate]
 //
 // With --lock it also sets a PIN and checks the app lock end to end: locked on
 // cold start and after backgrounding, wrong and right PIN, the delay after five
@@ -16,6 +16,10 @@
 // system settings (device PIN from DEVICE_PIN, default 1234) and checks that only
 // biometric unlock is switched off: the PIN still opens the app, the data is
 // intact, storage stays "ok" (no recovery screen), and biometrics can be re-enabled.
+//
+// --only-invalidate runs just that scenario (the PIN is set, biometrics enabled, one more
+// fingerprint enrolled) after `pm clear`, without reinstalling or doing the quick-add test.
+// Exactly one fingerprint must be enrolled beforehand.
 //
 // Needs a debug build (the release WebView is not inspectable, by design), an
 // emulator or device on adb, and Node 22+ (global fetch and WebSocket).
@@ -174,7 +178,15 @@ async function tapElement(selector, top, dpr) {
 
 // --- Flow ------------------------------------------------------------------
 
+async function onlyInvalidate() {
+  adb("shell", "pm", "clear", PACKAGE);
+  await startApp();
+  check("app started with an inspectable web view", true);
+  await biometricFlow({ invalidateOnly: true });
+}
+
 async function main() {
+  if (flag("--only-invalidate")) return onlyInvalidate();
   if (!flag("--no-install")) {
     if (!existsSync(apk)) throw new Error(`APK not found: ${apk} (pnpm tauri android build --apk --debug --target aarch64)`);
     try {
@@ -284,10 +296,36 @@ async function startApp() {
 
 const finger = (id) => adb("emu", "finger", "touch", String(id));
 
-async function biometricFlow() {
+/**
+ * Touches the sensor every 1.5 s until `pending` settles. The prompt's sensor can start
+ * a second or two after the prompt is shown (the emulator is slow), and a touch before
+ * that is lost; touching again is harmless once the prompt is gone.
+ */
+async function touchUntilSettled(id, pending) {
+  let settled = false;
+  const result = pending.finally(() => {
+    settled = true;
+  });
+  await sleep(2500);
+  for (let attempt = 0; !settled && attempt < 40; attempt += 1) {
+    finger(id);
+    await Promise.race([result.catch(() => {}), sleep(1500)]);
+  }
+  return result;
+}
+
+async function biometricFlow({ invalidateOnly = false } = {}) {
   const lockScreenShown = () => evaluate("!!document.querySelector('#lock-pin')");
   const first = await invoke("lock_setup", { pin: PIN });
   check("a fingerprint is enrolled on this device", first.biometric === "available", first.biometric);
+  if (invalidateOnly) {
+    await invoke("lock_step_up", { pin: PIN });
+    const enabling = invoke("lock_biometric_set", { enabled: true });
+    check("a touch enables biometric unlock", (await touchUntilSettled(1, enabling)).biometricEnabled === true);
+    await invalidationFlow(lockScreenShown);
+    check("the lock can be removed", (await invokeCode("lock_remove", { current: PIN })) === "ok");
+    return;
+  }
 
   // Changing the biometric setting needs a fresh PIN (F11).
   check("enabling biometrics is refused without a fresh PIN", (await invokeCode("lock_biometric_set", { enabled: true })) === "pin_required");
@@ -295,9 +333,7 @@ async function biometricFlow() {
 
   // Enabling proves the prompt works: it resolves only after a touch.
   const enabling = invoke("lock_biometric_set", { enabled: true });
-  await sleep(2500);
-  finger(1);
-  const enabled = await enabling;
+  const enabled = await touchUntilSettled(1, enabling);
   check("a touch enables biometric unlock", enabled.biometricEnabled === true);
 
   // Cold start: the prompt appears by itself; the enrolled finger unlocks.
@@ -377,7 +413,10 @@ async function enrollFingerprint(id) {
     }
   }
   if (!added) throw new Error("could not enrol an extra fingerprint");
-  adb("shell", "am", "start", "-n", ACTIVITY);
+  // Closing Settings returns to the app, which comes back locked and tries biometrics
+  // once: that attempt is the one that learns the key is invalid and shows the
+  // explanation, so the caller must look at the app as it is, not restart it.
+  adb("shell", "am", "force-stop", "com.android.settings");
 }
 
 async function invalidationFlow(lockScreenShown) {
@@ -385,7 +424,15 @@ async function invalidationFlow(lockScreenShown) {
   check("biometric unlock is on before the enrolment changes", (await invoke("lock_status")).biometricEnabled === true);
 
   await enrollFingerprint(3);
-  await startApp();
+  await until("the app, back in front", async () => {
+    try {
+      ws?.close();
+      await connect();
+      return await evaluate("typeof window.__TAURI_INTERNALS__ !== 'undefined'");
+    } catch {
+      return false;
+    }
+  });
   await until("lock screen", lockScreenShown);
   await until("the explanation", async () => evaluate("document.body.innerText.includes('biometrik dimatikan')"), 30_000);
   check("a new fingerprint switches biometric unlock off with an explanation", true);
@@ -401,9 +448,7 @@ async function invalidationFlow(lockScreenShown) {
   // Re-enabling works with the new enrolment (fresh PIN first).
   await invoke("lock_step_up", { pin: PIN });
   const enabling = invoke("lock_biometric_set", { enabled: true });
-  await sleep(2500);
-  finger(3);
-  check("biometric unlock can be enabled again", (await enabling).biometricEnabled === true);
+  check("biometric unlock can be enabled again", (await touchUntilSettled(1, enabling)).biometricEnabled === true);
   await startApp();
   await until("lock screen", lockScreenShown);
   await sleep(2500);

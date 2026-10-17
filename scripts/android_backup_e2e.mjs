@@ -132,6 +132,40 @@ async function startApp() {
 
 // --- System picker ------------------------------------------------------
 
+/**
+ * Opens the Files app once and waits until it is idle, so its cold start (and a
+ * possible "Files isn't responding" dialog) does not eat into the picker window
+ * (60 s, which is deliberately not changed). Polled by tries, not wall clock.
+ */
+async function warmUpFiles() {
+  adb("shell", "am", "start", "-a", "android.intent.action.VIEW_DOWNLOADS");
+  let stable = 0;
+  let last = -1;
+  for (let attempt = 0; attempt < 120 && stable < 3; attempt += 1) {
+    await sleep(1000);
+    let xml = "";
+    try {
+      adb("shell", "uiautomator", "dump", "/sdcard/mt-warm.xml");
+      xml = adb("shell", "cat", "/sdcard/mt-warm.xml");
+    } catch {
+      stable = 0;
+      continue;
+    }
+    if (/isn't responding/.test(xml)) {
+      const wait = /text="Wait"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(xml);
+      if (wait) adb("shell", "input", "tap", String((Number(wait[1]) + Number(wait[3])) / 2 | 0), String((Number(wait[2]) + Number(wait[4])) / 2 | 0));
+      stable = 0;
+      continue;
+    }
+    const nodes = (xml.match(/<node /g) ?? []).length;
+    const files = /documentsui/.test(xml) && nodes > 15;
+    stable = files && nodes === last ? stable + 1 : 0;
+    last = nodes;
+  }
+  if (stable < 3) throw new Error("the Files app did not become idle");
+  adb("shell", "input", "keyevent", "KEYCODE_HOME");
+}
+
 function dumpNodes() {
   adb("shell", "uiautomator", "dump", "/sdcard/mt-picker.xml");
   const xml = adb("shell", "cat", "/sdcard/mt-picker.xml");
@@ -359,6 +393,8 @@ try {
   adb("install", apk);
   await startApp();
   check("fresh install starts", true);
+  await warmUpFiles();
+  await startApp();
 
   await seed();
   const before = await snapshot();
