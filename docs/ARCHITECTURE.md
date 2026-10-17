@@ -1198,3 +1198,33 @@ Kunci backup diturunkan dari teks **NFKC**; bila sebuah rilis `unicode-normaliza
 Tes: keadaan *pending* memblokir `applock()`, `problem()`, dan `with_db` (macet selama 200 ms), lalu setelah start-up selesai menjawab `locked`/tanpa masalah bila PIN ada; langkah start-up tidak menunggu dirinya; step-up tidak ada sebelum kunci ada; tes sumber memastikan `setup` tidak memanggil `app_data_dir`/`LockService::load`/`initialize`/`clean_leftovers` dan hook tidak memakai `.applock()`.
 
 Hasil (APK rilis, emulator, dua build dengan penanda waktu sementara yang sama, 6 kali masing-masing, termasuk satu pencilan di tiap sisi): waktu sampai `lock_status` pertama dijawab (layar kunci dapat tampil) **sekitar 6,1-7,4 s sebelum, 4,0-5,3 s sesudah** (selisih 1,2-2 s, termasuk beberapa ratus ms overhead `adb` yang sama pada kedua sisi); `am start -W` (bingkai pertama) 2,4-3,1 s menjadi 1,6-2,1 s. Emulator sangat berfluktuasi di bawah beban host dan angka ponsel sungguhan belum ada. Smoke `--lock --biometric` (46) dan E2E backup (93) lulus dengan perubahan ini.
+
+## 34. Tinjauan manual putaran 3 (tanpa ambang), 1b27a65..6c26b33
+
+Dua putaran sebelumnya (ambang >=8/10) tidak mencakup komit Kelompok 4 (621ab8e, 31ffec3) dan 608615b, dan perbaikan F8/F10/F11/F12/F14/F21 hanya ditinjau dengan ambang. Tinjauan manual tanpa ambang atas seluruh `1b27a65..HEAD` menemukan hal-hal berikut. Rinciannya dari peninjau; "teoretis" berarti butuh keadaan yang sempit.
+
+**Diperbaiki** (satu komit per kelompok, gerbang lulus, smoke 46 dan E2E 93 di emulator setelahnya):
+
+| Kode | Temuan | Perbaikan |
+|---|---|---|
+| A1 (sedang) | `scripts/__pycache__/*.pyc` terlacak git: Python memuat `.pyc` menggantikan `.py`, jadi PR bisa menyelundupkan penjaga yang dilumpuhkan | dihapus dari git, `.gitignore` (+ `*.jks`, `*.keystore`, `*.p12`, `*.apk`, `*.aab`, `dist/`), `PYTHONDONTWRITEBYTECODE` di CI, penjaga gagal bila git melacak berkas semacam itu |
+| A2 (tinggi, bypass pagar) | pemindaian capability tidak rekursif; berkas dengan daftar `capabilities` dinilai dari bidang teratasnya (Tauri mengabaikannya); `tauri.android.conf.json` dapat memasang `csp: null`; `build.rs`/kode dapat memuat capability sendiri | dibaca rekursif, daftar dinilai per elemen, konfigurasi gabungan Tauri (`tauri.*.conf.json(5)`, `Tauri*.toml`) ditolak sampai penjaga dapat membacanya, `add_capability`/`capabilities_path_pattern` ditolak |
+| A3, A6 | label jendela/webview berupa glob lolos; `data:` diizinkan di tiap direktori CSP; `base-uri`, `form-action`, `object-src`, `frame-ancestors` tidak diwajibkan | label harus nama, `data:` hanya `img-src`/`font-src`, origin IPC hanya `connect-src`, direktori itu wajib |
+| A4 | pemindai sumber melewati berkas non-UTF-8, sufiks `.mjs/.cjs/.tsx/...`, `src-tauri/gen` (Kotlin), `build.rs`, `tauri.conf.json` | berkas non-UTF-8 gagal, sufiks dan aturan Kotlin ditambah, area itu dipindai; sedikit sisa yang sah ada di daftar pengecualian dengan alasan |
+| B1, B2, B4 | regex `uses:` melewatkan bentuk YAML lain; pemicu/izin dangkal; ekspresi tak tepercaya di `run:`; `curl \| sh` bersambung; `*` di CODEOWNERS memuaskan pemeriksaan; placeholder hanya peringatan | semua bentuk `uses`, aksi komposit, image tanpa digest, `permissions: write`, ekspresi tak tepercaya, pipa unduhan, aturan CODEOWNERS sendiri per jalur; **placeholder pemilik kini GAGAL di CI** |
+| D1-D4 | `build_app.sh` mengekspor kata sandi ke seluruh build (termasuk daemon Gradle); kunci debug publik di ponsel nyata; path keystore relatif lolos; APK gagal-periksa tertinggal | kata sandi dikeluarkan dari lingkungan di awal dan hanya diberikan ke `apksigner`; `--install` menolak APK bertanda tangan debug di ponsel nyata tanpa `--allow-debug-key`; `realpath` dan penolakan di dalam repo; berkas gagal-periksa dihapus, keluaran basi tidak ditandatangani |
+| F1 | `lock_step_up` membaca "terkunci?" dan generasi dalam dua langkah | dibaca bersama di bawah satu kunci |
+| F2 (rendah, nyata) | jam dinding diundur sebesar lama pergi memperpanjang tenggang diam-diam (jam monotonik berhenti saat tidur nyenyak) | jam ketiga: waktu sejak boot dari `/proc/uptime` (CLOCK_BOOTTIME); kunci bila salah satu dari tiga melampaui tenggang; mundur berarti reboot |
+| E4, F6, F7 | hook memakai `state()` (panik bila peristiwa datang sebelum `setup`); ekspor membuka picker walau sudah terkunci; `restore_prepare` di luar mutex penyimpanan | `try_state`; cek kunci ulang sebelum picker; mutex diambil |
+| (ditambahkan) | start-up yang macet tampil sebagai layar kosong | pemberitahuan "belum selesai memulai" setelah 25 detik (c22c574) |
+
+**Dicatat, belum dikerjakan** (rendah, teoretis, atau butuh keputusan):
+
+* C1: penjaga redaksi `Debug` dapat dilewati (`derive(core::fmt::Debug)`, makro, `pub(in ...)`); tes runtime `redaction_tests` tetap menjadi jaring utama. Arah: parser `syn`.
+* A5: pemeriksaan APK tidak memeriksa komponen diekspor/`networkSecurityConfig`; A7: `contains` di pengecualian adalah substring dan pengecualian `debug_redaction` terikat nama tipe saja.
+* B3: SHA tidak diikat ke repositori yang dimaksud dan komentar tag tidak diverifikasi (butuh jaringan); B5: artefak CI mengunggah semua APK dan `gradle-wrapper.properties` tanpa `distributionSha256Sum`.
+* D5: driver UIA mengoper argumen non-base64 ke shell perangkat (khusus emulator). D2 sisa: kunci debug tetap bawaan; kunci rilis milik pemilik.
+* E1: `catch_unwind` mati di rilis (`panic = "abort"`; hasil akhirnya sama). E2/E3: tidak ada batas waktu di sisi Rust untuk penantian start-up atau panggilan Keystore yang macet (pekerja runtime bisa habis oleh `lock_status` yang menumpuk; layar kini memberi tahu pengguna).
+* F3: hook di thread utama dapat menunggu mutex DB selama ekspor besar (risiko ANR); F4: layar pemulihan membuang restore yang sudah disiapkan bila aplikasi masuk latar; F5: celah `install_db` saat terkunci dan sisa `restore-staged.db` (terenkripsi); F8 info: step-up tidak sekali pakai dan tidak dibersihkan saat PIN dipasang.
+* H1: `undo_swap` dapat memulihkan kunci lama di atas kunci baru setelah DB lama terhapus, hanya pada crash tepat di titik itu ditambah vonis korup; H2: urutan penulisan direktori yang tidak berurutan tidak dimodelkan; H3/H4: `replace_data` mengabaikan hasil `undo_recorded`, dan pemulihan berjalan saat unlock (bukan saat proses mulai) bagi pengguna ber-PIN.
+* J1: `unicode-normalization` dipin persis sehingga patch keamanan perlu dinaikkan dengan sengaja (dengan vektor tetap).
