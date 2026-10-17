@@ -351,6 +351,8 @@ magic "MTBK" | format_version u16 | kdf_id u8 | argon2 m,t,p (u32 each) | salt[1
 | ~~`tauri-plugin-biometric` 2.4~~ → `androidx.biometric` 1.1.0 | Prompt biometrik (lewat plugin `mt-platform`) | Apache-2.0 | Google, stabil | Hanya mobile. Diganti di Fase 7A (hasil tidak boleh lewat JS) |
 | `tauri-plugin-dialog` 2.8 | Dialog simpan/buka (SAF) | MIT/Apache-2.0 | Resmi Tauri | Ke R5 |
 | `tauri-plugin-fs` 2.7 | Baca/tulis URI `content://` | MIT/Apache-2.0 | Resmi Tauri | Hanya bila R5 mengharuskan |
+| `criterion` 0.8 (dev) | Benchmarks `cargo bench` (kueri 100 ribu baris, KDF, cipher) | MIT/Apache-2.0 | Aktif (bheisler) | Hanya dev, fitur bawaan mati; **disetujui pemilik di Fase 8**; menambah `anes`, `ciborium`, `clap`, `half`, `itertools`, `oorandom`, `tinytemplate`, dan lainnya ke pohon dev |
+| `cargo-llvm-cov` 0.9.1 (alat, bukan crate) | Gerbang cakupan crate `mt-core` di CI dan gerbang lokal | MIT/Apache-2.0 | Aktif (taiki-e) | Dipasang lewat `taiki-e/install-action` yang dipin; butuh komponen `llvm-tools-preview`; **disetujui pemilik di Fase 8** |
 | `proptest` (dev) | Property test `Money` | MIT/Apache-2.0 | Aktif | Hanya dev. **Disetujui pemilik di Fase 8** (fitur bawaan dimatikan, hanya `std`; menambah `rand`, `rand_core`, `rand_xorshift`, `unarray` ke pohon dev) |
 | SQLCipher (via bundled) | Enkripsi DB | BSD-style (Zetetic) | Aktif | Wajib atribusi |
 | OpenSSL (vendored) | Kripto SQLCipher | Apache-2.0 | Aktif | Dikompilasi per ABI |

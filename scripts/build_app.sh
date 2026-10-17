@@ -133,6 +133,12 @@ if [ "$run_checks" -eq 1 ]; then
   cargo fmt --all --check
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
+  cargo check -p mt-storage -p mt-backup --benches --features mt-storage/bench-support
+  if command -v cargo-llvm-cov >/dev/null; then
+    cargo llvm-cov -p mt-core --fail-under-lines 85 --summary-only
+  else
+    echo "(cargo-llvm-cov not installed: skipping the core coverage gate; cargo install cargo-llvm-cov --locked)"
+  fi
   [ -d node_modules ] || pnpm install --frozen-lockfile
   pnpm check
   pnpm test

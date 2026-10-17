@@ -26,6 +26,41 @@ Run: `cargo test -p mt-storage --release -- --ignored --nocapture perf_100k`.
 Stored balances were considered and rejected: with the covering index a balance costs
 3 ms at 100 000 rows, and a computed balance cannot drift.
 
+## Benchmarks (criterion), relative numbers
+
+`cargo bench -p mt-storage --features bench-support` and `cargo bench -p mt-backup`
+(`crates/storage/benches/queries.rs`, `crates/backup/benches/crypto.rs`). criterion keeps
+the previous run, so a change reports "improved/regressed" against the one before it.
+100 000 seeded transactions, in-memory SQLCipher, host Mac, release profile:
+
+| Benchmark | Time |
+|---|---|
+| List page of 50: newest / cursor / one account / one month | 40 / 46 / 41 / 44 microseconds |
+| List page of 50: one category with children / text search | 11.7 / 20.0 ms |
+| Account list (a balance each) / net worth | 3.0 / 3.0 ms |
+| Spending report: one month / one year | 1.0 / 12.4 ms |
+| Monthly trend, 12 months | 24.7 ms |
+| Logical export (no encryption) | 37.7 ms |
+| **Restore into a new database and verify** | **9.1 s** |
+| Argon2id 64 MiB, t=3, p=1 (opening a tiny backup) | 92 ms |
+| ChaCha20-Poly1305 stream, 8 MiB: encrypt / decrypt | 222 / 402 MiB/s |
+
+**An open question from these numbers:** restoring the seeded data takes 9.1 s, while the
+older `big_backup_round_trip_with_timing` (100 000 rows of a different, tidier dump) restores
+in 1.6 s on the same machine. The seeded rows are in scrambled date order, so every insert
+lands in the middle of four indexes. The likely cause is index maintenance during the
+load, and the usual remedy is to create the indexes after the rows are in. That is a
+hypothesis, **not verified and not implemented** (no optimisation before real-device
+numbers); real backups come out in the order the rows were entered, which is far closer to
+the tidy case.
+
+## Test coverage of the domain crate
+
+`cargo llvm-cov -p mt-core --summary-only`: **88.4% of lines** (91.7% of regions); `money.rs`
+is at 100% of lines, the PIN policy 94%, and the weakest files are `transaction.rs` 73% and
+`error.rs` 0% (Display impls). CI fails below 85% of lines (`.github/workflows/ci.yml`); raise
+the bar when coverage rises, never lower it to make a change pass.
+
 ## Crypto and backup (host, release)
 
 | What | Time | Test |
