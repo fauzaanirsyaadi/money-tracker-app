@@ -21,6 +21,14 @@ pub const LIVE_DB: &str = "money.db";
 const OLD_SUFFIX: &str = ".old";
 /// Files that make up one SQLite database.
 const COMPANIONS: [&str; 3] = ["", "-wal", "-shm"];
+/// Moving a database *away* (aside, or the staged one into place): the
+/// companions go first and the main file last, so a main file that has arrived
+/// means the whole set has. The mirror image of [`BACK_ORDER`].
+const AWAY_ORDER: [&str; 3] = ["-wal", "-shm", ""];
+/// Moving the old database *back*: the main file first. A main file back in
+/// place with companions still aside is then recognisable as an interrupted move
+/// (see [`recover_interrupted`]), and those companions are put back, never deleted.
+const BACK_ORDER: [&str; 3] = ["", "-wal", "-shm"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupFailure {
@@ -152,15 +160,72 @@ fn new_key_path(dir: &Path) -> PathBuf {
     with_suffix(&dir.join(KEY_FILE), ".new")
 }
 
-fn rename_set(from: &Path, to: &Path) -> io::Result<()> {
-    for suffix in COMPANIONS {
+/// Every rename in a swap goes through here, so that tests can stop the process
+/// (as a power loss would) between any two of them.
+fn mv(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        let stop = RENAME_BUDGET.with(|budget| match budget.get() {
+            Some(0) => {
+                // One crash, not a crash per rename: a rollback after it must be able to run.
+                budget.set(None);
+                true
+            }
+            Some(left) => {
+                budget.set(Some(left - 1));
+                false
+            }
+            None => false,
+        });
+        if stop {
+            return Err(io::Error::other("injected crash"));
+        }
+    }
+    fs::rename(from, to)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Renames still allowed before the injected crash; `None` = no injection.
+    static RENAME_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn rename_set(from: &Path, to: &Path, order: [&str; 3]) -> io::Result<()> {
+    for suffix in order {
         let (src, dst) = (with_suffix(from, suffix), with_suffix(to, suffix));
         // `fs::exists` fails on anything but "not found" instead of calling it absent.
         if fs::exists(&src)? {
-            fs::rename(src, dst)?;
+            mv(&src, &dst)?;
         }
     }
     Ok(())
+}
+
+/// Whether any file of the old database is aside.
+fn old_set_present(dir: &Path) -> io::Result<bool> {
+    for file in companions(&old_path(dir)) {
+        if fs::exists(file)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Puts the old database back, from whatever state an interrupted move left.
+///
+/// * the old main file is aside: everything now at the live name belongs to the
+///   *new* data and goes, then the old set returns, main file first;
+/// * the old main file is not aside but companions are: the move was cut short
+///   while setting them aside (or bringing them back). The live main file is the
+///   old one, so nothing at the live name is touched, and the companions return.
+///   (Deleting the live files here would destroy the old database's committed
+///   but not yet checkpointed log.)
+fn put_old_database_back(dir: &Path) -> io::Result<()> {
+    let live = dir.join(LIVE_DB);
+    if fs::exists(old_path(dir))? {
+        remove_database(&live);
+    }
+    rename_set(&old_path(dir), &live, BACK_ORDER)
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -244,23 +309,24 @@ fn run_swap(
         progress.new_key_written = true;
     }
     hook(SwapStep::MoveDbAside)?;
-    if fs::exists(&live)? {
-        rename_set(&live, &old_path(dir))?;
-        progress.db_moved = true;
-    }
+    // Recorded *before* the move: a move cut short is undone from what is on disk.
+    progress.db_moved = true;
+    rename_set(&live, &old_path(dir), AWAY_ORDER)?;
     if new_key.is_some() {
         hook(SwapStep::MoveKeyAside)?;
         if fs::exists(&key)? {
-            fs::rename(&key, old_key_path(dir))?;
+            mv(&key, &old_key_path(dir))?;
             progress.key_moved = true;
         }
         hook(SwapStep::PromoteKey)?;
-        fs::rename(new_key_path(dir), &key)?;
+        mv(&new_key_path(dir), &key)?;
         progress.key_promoted = true;
     }
     hook(SwapStep::MoveStagedIn)?;
-    rename_set(staged, &live)?;
     progress.staged_from = Some(staged.to_path_buf());
+    rename_set(staged, &live, AWAY_ORDER)?;
+    // The renames are in the directory entries; make them survive a power loss.
+    crate::durable::sync_dir(dir);
     Ok(())
 }
 
@@ -270,8 +336,9 @@ fn restore_old(dir: &Path, progress: &Progress) -> io::Result<()> {
     let key = dir.join(KEY_FILE);
     if let Some(staged) = &progress.staged_from {
         // The staged database goes back where it came from rather than being
-        // deleted: a retry does not have to rebuild it.
-        if rename_set(&live, staged).is_err() {
+        // deleted: a retry does not have to rebuild it. (It may not have moved,
+        // or only partly: whatever is at the live name then is the staged one's.)
+        if rename_set(&live, staged, AWAY_ORDER).is_err() {
             remove_database(&live);
         }
     }
@@ -279,15 +346,15 @@ fn restore_old(dir: &Path, progress: &Progress) -> io::Result<()> {
         let _ = fs::remove_file(&key);
     }
     if progress.key_moved {
-        fs::rename(old_key_path(dir), &key)?;
+        mv(&old_key_path(dir), &key)?;
     }
     if progress.db_moved {
-        remove_database(&live);
-        rename_set(&old_path(dir), &live)?;
+        put_old_database_back(dir)?;
     }
     if progress.new_key_written {
         let _ = fs::remove_file(new_key_path(dir));
     }
+    crate::durable::sync_dir(dir);
     Ok(())
 }
 
@@ -299,25 +366,30 @@ pub fn undo_recorded(dir: &Path, record: &SwapRecord) -> io::Result<()> {
 
 /// The new data opened and verified: the old files can go.
 pub fn finish_swap(dir: &Path) {
-    remove_database(&old_path(dir));
+    // Companions first, main file last: if this is cut short, a main file still
+    // aside says "not finished, the new pair is verified, finish again" (see
+    // `recover_interrupted`), whereas companions aside *without* a main file
+    // would read as an interrupted move and be put back beside the new database.
+    let old = old_path(dir);
+    for suffix in AWAY_ORDER {
+        let _ = fs::remove_file(with_suffix(&old, suffix));
+    }
     let _ = fs::remove_file(old_key_path(dir));
     let _ = fs::remove_file(new_key_path(dir));
+    crate::durable::sync_dir(dir);
 }
 
 /// The new data was bad: bring the old files back. Needs no memory of what the
 /// swap did (it also settles a crashed one), so it only looks at what is on disk.
 pub fn undo_swap(dir: &Path) -> io::Result<()> {
-    let live = dir.join(LIVE_DB);
     let key = dir.join(KEY_FILE);
-    if fs::exists(old_path(dir))? {
-        remove_database(&live);
-        rename_set(&old_path(dir), &live)?;
-    }
+    put_old_database_back(dir)?;
     if fs::exists(old_key_path(dir))? {
         let _ = fs::remove_file(&key);
-        fs::rename(old_key_path(dir), &key)?;
+        mv(&old_key_path(dir), &key)?;
     }
     let _ = fs::remove_file(new_key_path(dir));
+    crate::durable::sync_dir(dir);
     Ok(())
 }
 
@@ -351,7 +423,8 @@ pub enum Recovered {
 ///
 /// A swap leaves marker files (`money.db.old`, `db.key.old`, `db.key.new`).
 /// The old copies are restored **only on a definite answer**:
-/// * `db.key.new` still present: the swap never finished its renames;
+/// * `db.key.new` still present, or old companions aside without the old main
+///   file: the swap never finished its renames;
 /// * the live database is missing;
 /// * the probe says the pair in place is corrupt.
 ///
@@ -359,18 +432,30 @@ pub enum Recovered {
 /// tell, or the files cannot even be examined, **nothing is changed**: a
 /// transient failure must never turn newer data into the stale older copy.
 pub fn recover_interrupted(dir: &Path, probe: impl FnOnce() -> Probe) -> Recovered {
-    let markers = [old_path(dir), old_key_path(dir), new_key_path(dir)];
-    let mut present = [false; 3];
+    let markers = [old_key_path(dir), new_key_path(dir)];
+    let mut present = [false; 2];
     for (slot, marker) in present.iter_mut().zip(&markers) {
         match fs::exists(marker) {
             Ok(found) => *slot = found,
             Err(_) => return Recovered::Undecided,
         }
     }
-    if !present.iter().any(|found| *found) {
+    // The old database counts as present if *any* of its files is aside.
+    let old_set = match old_set_present(dir) {
+        Ok(found) => found,
+        Err(_) => return Recovered::Undecided,
+    };
+    let old_main = match fs::exists(old_path(dir)) {
+        Ok(found) => found,
+        Err(_) => return Recovered::Undecided,
+    };
+    if !old_set && !present.iter().any(|found| *found) {
         return Recovered::Nothing;
     }
-    let unfinished = present[2];
+    // Unfinished: the new key is not yet in place, or the old database's
+    // companions are aside without its main file, which only an interrupted
+    // move produces (`finish_swap` deletes the main file last).
+    let unfinished = present[1] || (old_set && !old_main);
     let live_present = match fs::exists(dir.join(LIVE_DB)) {
         Ok(found) => found,
         Err(_) => return Recovered::Undecided,
@@ -1130,5 +1215,228 @@ mod tests {
             !bytes.windows(7).any(|w| w == b"catatan"),
             "staged file is encrypted"
         );
+    }
+
+    // --- F16/F17: a power loss between any two renames, with a hot log --------------
+    //
+    // SQLite keeps recent commits in `money.db-wal` until a checkpoint. A swap that
+    // moves the main file and its log as separate renames can be cut between them;
+    // the old database's committed rows then live only in the log. These tests stop
+    // the "process" before every single rename and check that the next start always
+    // finds the old data (log included) or the new data, never a mix, never less.
+
+    /// (accounts, first balance): which data a pair holds.
+    type PairState = (usize, i64);
+
+    fn pair_state(dir: &Dir) -> Option<PairState> {
+        let blob = fs::read(dir.file("db.key")).ok()?;
+        let plain: Vec<u8> = blob.iter().map(|b| b ^ 0x5a).collect();
+        let bytes: [u8; 32] = plain.try_into().ok()?;
+        let db = Db::open(&dir.file(LIVE_DB), &DbKey::new(bytes)).ok()?;
+        let accounts = db.accounts(true).ok()?;
+        Some((accounts.len(), accounts.first()?.balance.minor()))
+    }
+
+    /// The old pair has a committed account that exists only in its `-wal`.
+    fn hot_log_fixture() -> (Dir, Vec<u8>, PairState, PairState) {
+        let (dir, _, new_blob, old_balance, new_balance) = pair_fixture();
+        // Make the log: write through a connection in a scratch copy and take the
+        // main file plus its log while that connection is still open (a snapshot of
+        // a process that died with an uncheckpointed commit).
+        let scratch = Dir::new();
+        fs::copy(dir.file(LIVE_DB), scratch.file(LIVE_DB)).unwrap();
+        let mut db = Db::open(&scratch.file(LIVE_DB), &key(OLD_KEY)).unwrap();
+        let money = |m| mt_core::Money::from_minor(m, mt_core::Currency::IDR).unwrap();
+        db.create_account(
+            &mt_core::AccountDraft::new("Hanya di log", mt_core::AccountKind::Cash, money(0))
+                .unwrap(),
+            0,
+        )
+        .unwrap();
+        let wal = scratch.file("money.db-wal");
+        assert!(
+            fs::metadata(&wal).unwrap().len() > 0,
+            "the fixture must have a hot log"
+        );
+        let (main_bytes, wal_bytes) = (
+            fs::read(scratch.file(LIVE_DB)).unwrap(),
+            fs::read(&wal).unwrap(),
+        );
+        drop(db);
+        // Prove, in a throwaway copy (opening checkpoints and removes the log), that the
+        // committed account really is only in main + log.
+        let probe = Dir::new();
+        fs::copy(dir.file("db.key"), probe.file("db.key")).unwrap();
+        fs::write(probe.file(LIVE_DB), &main_bytes).unwrap();
+        fs::write(probe.file("money.db-wal"), &wal_bytes).unwrap();
+        assert_eq!(pair_state(&probe).expect("the hot-log pair opens").0, 6);
+        let cold = Dir::new();
+        fs::copy(dir.file("db.key"), cold.file("db.key")).unwrap();
+        fs::write(cold.file(LIVE_DB), &main_bytes).unwrap();
+        assert_eq!(
+            pair_state(&cold).expect("main alone opens").0,
+            5,
+            "without the log the account is missing"
+        );
+        // The fixture itself: main file plus its log, nothing checkpointed.
+        fs::write(dir.file(LIVE_DB), &main_bytes).unwrap();
+        fs::write(dir.file("money.db-wal"), &wal_bytes).unwrap();
+        assert!(dir.file("money.db-wal").exists());
+        (dir, new_blob, (6, old_balance), (5, new_balance))
+    }
+
+    fn with_budget<T>(budget: Option<usize>, work: impl FnOnce() -> T) -> T {
+        RENAME_BUDGET.with(|b| b.set(budget));
+        let out = work();
+        RENAME_BUDGET.with(|b| b.set(None));
+        out
+    }
+
+    #[test]
+    fn a_power_loss_before_any_single_rename_of_a_swap_loses_nothing() {
+        for with_key in [true, false] {
+            let mut finished = false;
+            for budget in 0..60 {
+                let (dir, new_blob, old, new) = hot_log_fixture();
+                let result = with_budget(Some(budget), || {
+                    swap_inner(
+                        &dir.0,
+                        &dir.file("staged.db"),
+                        with_key.then_some(new_blob.as_slice()),
+                        |_| Ok(()),
+                        false, // a crash: no rollback runs
+                    )
+                });
+                recover_interrupted(&dir.0, || {
+                    if pair_state(&dir).is_some() {
+                        Probe::Opens
+                    } else {
+                        Probe::Corrupt
+                    }
+                });
+                let state = pair_state(&dir);
+                let context = format!("key swap {with_key}, crash before rename {budget}");
+                if with_key {
+                    assert!(
+                        state == Some(old) || state == Some(new),
+                        "{context}: {state:?}"
+                    );
+                } else {
+                    // Without a key swap the pair is the old key with either database.
+                    assert!(state.is_some(), "{context}: the data must open");
+                    let (accounts, _) = state.unwrap();
+                    assert!(accounts == 6 || accounts == 5, "{context}: {state:?}");
+                    // The committed account that lived only in the log must not vanish
+                    // while the old database is what is in place.
+                    if state.map(|s| s.1) == Some(old.1) {
+                        assert_eq!(accounts, 6, "{context}: the log's rows were lost");
+                    }
+                }
+                assert_no_markers(&dir, &context);
+                assert!(
+                    !dir.file("money.db-wal").exists() || state.is_some(),
+                    "{context}: a stray log beside unreadable data"
+                );
+                if result.is_ok() {
+                    finished = true;
+                    break;
+                }
+            }
+            assert!(finished, "the swap never completed within the budget");
+        }
+    }
+
+    #[test]
+    fn a_power_loss_before_any_single_rename_of_an_undo_loses_nothing() {
+        let mut finished = false;
+        for budget in 0..60 {
+            let (dir, new_blob, old, new) = hot_log_fixture();
+            swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+            let result = with_budget(Some(budget), || undo_swap(&dir.0));
+            recover_interrupted(&dir.0, || {
+                if pair_state(&dir).is_some() {
+                    Probe::Opens
+                } else {
+                    Probe::Corrupt
+                }
+            });
+            let state = pair_state(&dir);
+            let context = format!("crash before undo rename {budget}");
+            assert!(
+                state == Some(old) || state == Some(new),
+                "{context}: {state:?}"
+            );
+            assert_no_markers(&dir, &context);
+            if result.is_ok() {
+                assert_eq!(
+                    state,
+                    Some(old),
+                    "a finished undo brings the old data back, log included"
+                );
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished);
+    }
+
+    #[test]
+    fn a_failed_rename_rolls_back_to_the_old_data_with_its_log() {
+        // Not a crash: the rename fails, the swap's own rollback runs (and succeeds).
+        let mut finished = false;
+        for budget in 0..60 {
+            let (dir, new_blob, old, _) = hot_log_fixture();
+            let result = with_budget(Some(budget), || {
+                swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(()))
+            });
+            if result.is_ok() {
+                finished = true;
+                break;
+            }
+            assert_eq!(pair_state(&dir), Some(old), "failure at rename {budget}");
+            assert_no_markers(&dir, &format!("failure at rename {budget}"));
+            assert!(
+                dir.file("staged.db").exists(),
+                "the staged database goes back for a retry"
+            );
+        }
+        assert!(finished);
+    }
+
+    #[test]
+    fn a_finish_cut_short_still_ends_with_the_new_data() {
+        // finish_swap removes the old files in a fixed order; cut it after each one.
+        for removed in 0..=5 {
+            let (dir, new_blob, _, new) = hot_log_fixture();
+            swap_with(&dir.0, &dir.file("staged.db"), Some(&new_blob), |_| Ok(())).unwrap();
+            let old = old_path(&dir.0);
+            let steps: [PathBuf; 5] = [
+                with_suffix(&old, "-wal"),
+                with_suffix(&old, "-shm"),
+                old.clone(),
+                old_key_path(&dir.0),
+                new_key_path(&dir.0),
+            ];
+            for file in steps.iter().take(removed) {
+                let _ = fs::remove_file(file);
+            }
+            recover_interrupted(&dir.0, || {
+                if pair_state(&dir).is_some() {
+                    Probe::Opens
+                } else {
+                    Probe::Corrupt
+                }
+            });
+            assert_eq!(
+                pair_state(&dir),
+                Some(new),
+                "finish cut after {removed} removals"
+            );
+            assert_no_markers(&dir, &format!("finish cut after {removed}"));
+            assert!(
+                !dir.file("money.db.old-wal").exists() && !dir.file("money.db.old-shm").exists(),
+                "finish cut after {removed}: old log files left behind"
+            );
+        }
     }
 }

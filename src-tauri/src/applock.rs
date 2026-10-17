@@ -12,7 +12,6 @@
 
 use std::{
     fs, io,
-    io::Write,
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
     time::{Duration, Instant, SystemTime},
@@ -529,15 +528,10 @@ impl LockService {
     }
 }
 
-/// Writes, fsyncs and renames so a crash never leaves a truncated lock file.
+/// A crash or a power loss never leaves a truncated lock file (see `durable`).
 fn write_record(path: &Path, record: &Record) -> io::Result<()> {
     let bytes = serde_json::to_vec(record).map_err(io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path)
+    crate::durable::write_atomic(path, &bytes)
 }
 
 #[cfg(test)]

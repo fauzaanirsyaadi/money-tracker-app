@@ -12,8 +12,7 @@
 //! lead to a recovery or a new key.
 
 use std::{
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
 };
@@ -332,12 +331,7 @@ fn load_key(
 /// Write, fsync, then rename: a crash or power loss never leaves a truncated
 /// or empty key file in place of the real one.
 fn write_key_file(dir: &Path, blob: &[u8]) -> io::Result<()> {
-    let tmp = dir.join(format!("{KEY_FILE}.tmp"));
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(blob)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, dir.join(KEY_FILE))
+    crate::durable::write_atomic(&dir.join(KEY_FILE), blob)
 }
 
 /// Opens whatever `db.key` and `money.db` are in place right now, without

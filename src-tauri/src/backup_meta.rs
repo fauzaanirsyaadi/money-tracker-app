@@ -7,7 +7,7 @@
 //! nothing about the data. No clock is trusted beyond a reminder: a stamp in the
 //! future simply counts as "today".
 
-use std::{fs, io, io::Write, path::Path};
+use std::{fs, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,12 +23,7 @@ pub struct BackupMeta {
 
 fn write(dir: &Path, meta: &BackupMeta) -> io::Result<()> {
     let bytes = serde_json::to_vec(meta).map_err(io::Error::other)?;
-    let tmp = dir.join(format!("{META_FILE}.tmp"));
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, dir.join(META_FILE))
+    crate::durable::write_atomic(&dir.join(META_FILE), &bytes)
 }
 
 /// Reads the file, creating it (with `since` = now) when it is missing or cannot

@@ -6,6 +6,7 @@ mod backup;
 mod backup_cmd;
 mod backup_meta;
 mod budgets;
+mod durable;
 mod error;
 mod lock;
 mod platform;
