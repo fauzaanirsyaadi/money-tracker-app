@@ -393,7 +393,16 @@ export interface RestorePreview {
   current: BackupCounts;
 }
 
+export interface BackupStatusInfo {
+  /** Epoch milliseconds of the last saved export, or null when there is none. */
+  lastBackupAtMs: number | null;
+  /** Epoch milliseconds of the first time the app looked, so "never" has an age. */
+  sinceMs: number;
+}
+
 export const backup = {
+  /** When the data was last backed up (a local file; for the reminder). */
+  status: () => call<BackupStatusInfo>("backup_status"),
   /** Encrypts and offers the file to the system "save as" picker. */
   export: (passphrase: string, name: string) =>
     call<{ saved: boolean; counts: BackupCounts }>("backup_export", { passphrase, name }),

@@ -224,16 +224,46 @@ pub async fn backup_export(
     let _ = fs::remove_file(&temp);
 
     match outcome {
-        Ok(FileOutcome::Done) => Ok(ExportDto {
-            saved: true,
-            counts: CountsDto::from(&summary),
-        }),
+        Ok(FileOutcome::Done) => {
+            // The reminder's clock restarts. Best effort: the backup itself succeeded.
+            if let Ok(dir) = vault::data_dir(&app) {
+                let _ = crate::backup_meta::record_backup(&dir, crate::backup_meta::now_ms());
+            }
+            Ok(ExportDto {
+                saved: true,
+                counts: CountsDto::from(&summary),
+            })
+        }
         Ok(FileOutcome::Cancelled) => Ok(ExportDto {
             saved: false,
             counts: CountsDto::from(&summary),
         }),
         Err(_) => Err(internal()),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStatusDto {
+    /// Epoch milliseconds of the last saved export, or null when there is none.
+    pub last_backup_at_ms: Option<u64>,
+    /// Epoch milliseconds of the first time the app looked, so "never" has an age.
+    pub since_ms: u64,
+}
+
+/// When the data was last backed up, for the reminder. Local file only.
+#[tauri::command]
+pub async fn backup_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BackupStatusDto, AppError> {
+    require_unlocked(&state)?;
+    let dir = vault::data_dir(&app).map_err(|_| internal())?;
+    let meta = crate::backup_meta::load_or_init(&dir, crate::backup_meta::now_ms());
+    Ok(BackupStatusDto {
+        last_backup_at_ms: meta.last_ms,
+        since_ms: meta.since_ms,
+    })
 }
 
 /// Step 1 of a restore: let the user choose the backup file.

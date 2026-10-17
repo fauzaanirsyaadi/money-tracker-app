@@ -53,3 +53,44 @@ export function backupErrorMessage(code: ErrorCode): string {
       return "Tidak berhasil. Data Anda tidak diubah.";
   }
 }
+
+// --- Reminder: how long since the last backup (all local, no network) -------------
+
+/** After this many days without a backup the app says so at the top of every screen. */
+export const BACKUP_STALE_DAYS = 7;
+
+const DAY_MS = 86_400_000;
+
+export interface BackupStatus {
+  /** Epoch milliseconds of the last saved export, or null when there is none. */
+  lastBackupAtMs: number | null;
+  /** Epoch milliseconds of the first time the app looked, so "never" has an age. */
+  sinceMs: number;
+}
+
+/**
+ * Whole days since the last backup, or since the app first looked when there is
+ * none. A stamp in the future (the clock was set back) counts as today: the
+ * reminder is advice, so it never errs towards alarming.
+ */
+export function backupAgeDays(status: BackupStatus, nowMs: number): number {
+  const reference = status.lastBackupAtMs ?? status.sinceMs;
+  return Math.max(0, Math.floor((nowMs - reference) / DAY_MS));
+}
+
+/** One line for the backup card, always shown. */
+export function backupAgeText(status: BackupStatus, nowMs: number): string {
+  const days = backupAgeDays(status, nowMs);
+  if (status.lastBackupAtMs === null) return "Belum pernah membuat cadangan.";
+  if (days === 0) return "Terakhir backup hari ini.";
+  return `Terakhir backup ${days} hari lalu.`;
+}
+
+/** The banner text, or null while the last backup is recent enough. */
+export function backupBanner(status: BackupStatus, nowMs: number): string | null {
+  const days = backupAgeDays(status, nowMs);
+  if (days < BACKUP_STALE_DAYS) return null;
+  return status.lastBackupAtMs === null
+    ? `Data belum pernah dicadangkan (${days} hari sejak dipakai). Buat cadangan.`
+    : `Terakhir backup ${days} hari lalu. Buat cadangan baru.`;
+}

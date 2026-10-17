@@ -1,6 +1,14 @@
 // UI state shared between the shell, the quick-add sheet and the screens.
 
-import { ApiError, lock, setLockedHandler, type LockStatus, type Transaction } from "$lib/api";
+import {
+  ApiError,
+  backup,
+  lock,
+  setLockedHandler,
+  type BackupStatusInfo,
+  type LockStatus,
+  type Transaction,
+} from "$lib/api";
 
 export const ui = $state({
   /** Whether the quick-add / edit sheet is open. */
@@ -104,4 +112,15 @@ export async function guarded<T>(action: () => Promise<T>): Promise<T> {
   }
   if (!(await askStepUp())) throw new ApiError("cancelled", "cancelled");
   return action();
+}
+
+/** When the data was last backed up; null until known. Drives the reminder banner. */
+export const backupState = $state({ status: null as BackupStatusInfo | null });
+
+export async function refreshBackupStatus(): Promise<void> {
+  try {
+    backupState.status = await backup.status();
+  } catch {
+    // The reminder is advice only: no answer means no banner.
+  }
 }

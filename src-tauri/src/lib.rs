@@ -4,6 +4,7 @@ mod accounts;
 mod applock;
 mod backup;
 mod backup_cmd;
+mod backup_meta;
 mod budgets;
 mod error;
 mod lock;
@@ -106,6 +107,7 @@ pub fn run() {
         recovery::recovery_retry,
         recovery::recovery_start_fresh,
         backup_cmd::backup_export,
+        backup_cmd::backup_status,
         backup_cmd::backup_restore_pick,
         backup_cmd::backup_restore_prepare,
         backup_cmd::backup_restore_commit,

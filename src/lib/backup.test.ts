@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { backupErrorMessage, backupFileName, passphraseProblem } from "./backup.ts";
+import {
+  BACKUP_STALE_DAYS,
+  backupAgeDays,
+  backupAgeText,
+  backupBanner,
+  backupErrorMessage,
+  backupFileName,
+  passphraseProblem,
+} from "./backup.ts";
 
 test("short, long and repetitive passphrases are explained", () => {
   assert.match(passphraseProblem("pendek")!, /minimal 12/);
@@ -46,4 +54,39 @@ test("every backup failure has its own message and never blames the data silentl
   const messages = new Set(codes.map(backupErrorMessage));
   assert.equal(messages.size, codes.length);
   assert.match(backupErrorMessage("internal"), /tidak diubah/);
+});
+
+const DAY = 86_400_000;
+const NOW = Date.UTC(2026, 9, 17, 12, 0, 0);
+
+test("the backup age counts whole days from the last backup, or from first use", () => {
+  assert.equal(backupAgeDays({ lastBackupAtMs: NOW - 3 * DAY - 1000, sinceMs: NOW - 90 * DAY }, NOW), 3);
+  assert.equal(backupAgeDays({ lastBackupAtMs: null, sinceMs: NOW - 10 * DAY }, NOW), 10);
+  assert.equal(backupAgeDays({ lastBackupAtMs: NOW - DAY + 1, sinceMs: 0 }, NOW), 0);
+});
+
+test("a stamp in the future counts as today and never alarms", () => {
+  const status = { lastBackupAtMs: NOW + 5 * DAY, sinceMs: NOW - 30 * DAY };
+  assert.equal(backupAgeDays(status, NOW), 0);
+  assert.equal(backupBanner(status, NOW), null);
+});
+
+test("the card always says how old the last backup is", () => {
+  assert.equal(backupAgeText({ lastBackupAtMs: NOW - 2 * DAY, sinceMs: 0 }, NOW), "Terakhir backup 2 hari lalu.");
+  assert.equal(backupAgeText({ lastBackupAtMs: NOW - 1000, sinceMs: 0 }, NOW), "Terakhir backup hari ini.");
+  assert.equal(backupAgeText({ lastBackupAtMs: null, sinceMs: NOW }, NOW), "Belum pernah membuat cadangan.");
+});
+
+test("the banner appears only once the backup is stale", () => {
+  const at = (days: number) => ({ lastBackupAtMs: NOW - days * DAY, sinceMs: 0 });
+  assert.equal(backupBanner(at(BACKUP_STALE_DAYS - 1), NOW), null);
+  assert.equal(backupBanner(at(BACKUP_STALE_DAYS), NOW), "Terakhir backup 7 hari lalu. Buat cadangan baru.");
+  assert.match(backupBanner(at(30), NOW)!, /30 hari lalu/);
+});
+
+test("never backed up: quiet at first, then a banner that says for how long", () => {
+  const fresh = { lastBackupAtMs: null, sinceMs: NOW - 2 * DAY };
+  assert.equal(backupBanner(fresh, NOW), null);
+  const old = { lastBackupAtMs: null, sinceMs: NOW - 9 * DAY };
+  assert.match(backupBanner(old, NOW)!, /belum pernah dicadangkan \(9 hari sejak dipakai\)/);
 });

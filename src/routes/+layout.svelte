@@ -17,10 +17,13 @@
     dataChanged,
     lockState,
     notify,
+    backupState,
     openQuickAdd,
+    refreshBackupStatus,
     refreshLock,
     ui,
   } from "$lib/session.svelte";
+  import { backupBanner } from "$lib/backup";
 
   let { children } = $props();
 
@@ -85,8 +88,17 @@
   }
 
   $effect(() => {
-    if (lockState.unlocks > 0) untrack(() => void catchUp());
+    if (lockState.unlocks > 0) {
+      untrack(() => {
+        void catchUp();
+        void refreshBackupStatus();
+      });
+    }
   });
+
+  const backupReminder = $derived(
+    backupState.status ? backupBanner(backupState.status, Date.now()) : null,
+  );
 
   // Cover the content the moment the app is hidden, before the OS takes its
   // task-switcher snapshot, and re-check the lock when it comes back.
@@ -172,6 +184,9 @@
     <div class="content">
       {#if ui.notice}
         <p class="notice" role="status">{ui.notice}</p>
+      {/if}
+      {#if backupReminder && page.url.pathname !== "/settings"}
+        <p class="reminder" role="status"><a href="/settings">{backupReminder}</a></p>
       {/if}
       {@render children()}
     </div>
@@ -270,6 +285,17 @@
     max-width: var(--content-max);
     margin: 0 auto;
     padding: var(--space-4) var(--space-4) calc(var(--nav-height) + 6rem);
+  }
+  .reminder {
+    margin: 0 0 var(--space-3);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--warning-bg);
+    font-weight: 600;
+  }
+  .reminder a {
+    color: var(--warning);
+    text-decoration: none;
   }
   .notice {
     margin-bottom: var(--space-3);

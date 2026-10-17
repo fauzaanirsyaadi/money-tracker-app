@@ -1,12 +1,12 @@
 <script lang="ts">
   import { ApiError, backup } from "$lib/api";
-  import { backupErrorMessage, backupFileName, passphraseProblem } from "$lib/backup";
+  import { backupAgeText, backupErrorMessage, backupFileName, passphraseProblem } from "$lib/backup";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Field from "$lib/components/Field.svelte";
   import { isoDate } from "$lib/dates";
   import RestoreCard from "$lib/components/RestoreCard.svelte";
-  import { guarded, notify } from "$lib/session.svelte";
+  import { backupState, guarded, notify, refreshBackupStatus } from "$lib/session.svelte";
 
   // --- export ---
   let passphrase = $state("");
@@ -37,6 +37,7 @@
         passphrase = "";
         repeat = "";
         understood = false;
+        void refreshBackupStatus();
       } else {
         notify("Pembuatan cadangan dibatalkan.");
       }
@@ -56,6 +57,10 @@
     Simpan salinan data Anda sebagai satu berkas terenkripsi, lalu pulihkan di perangkat ini atau
     perangkat lain. PIN dan kunci perangkat tidak ikut di dalamnya.
   </p>
+
+  {#if backupState.status}
+    <p class="age" role="status">{backupAgeText(backupState.status, Date.now())}</p>
+  {/if}
 
   <form class="stack" onsubmit={exportBackup}>
     <Field label="Frasa sandi cadangan" hint="Minimal 12 karakter. Kalimat panjang lebih kuat daripada kata acak pendek.">
@@ -86,6 +91,10 @@
   h2 {
     margin: 0 0 var(--space-2);
     font-size: var(--fs-lg);
+  }
+  .age {
+    margin: 0 0 var(--space-3);
+    font-weight: 600;
   }
   .stack {
     display: grid;
