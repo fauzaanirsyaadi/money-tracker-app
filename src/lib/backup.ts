@@ -46,7 +46,9 @@ export function backupErrorMessage(code: ErrorCode): string {
     case "locked":
       return "Aplikasi terkunci. Buka kunci dulu.";
     case "pin_required":
-      return "Masukkan PIN lagi untuk melanjutkan pemulihan.";
+      return "Masukkan PIN lagi untuk melanjutkan.";
+    case "cancelled":
+      return "Dibatalkan. Tidak ada yang diubah.";
     default:
       return "Tidak berhasil. Data Anda tidak diubah.";
   }

@@ -342,8 +342,8 @@ export interface LockStatus {
   retryAfterMs: number | null;
   /** Whether the stored data can be used; see `StorageState`. */
   storage: StorageState;
-  /** The PIN was confirmed recently for the destructive recovery steps. */
-  recoveryAuthenticated: boolean;
+  /** The PIN was confirmed within the last minute for guarded actions. */
+  stepUpActive: boolean;
 }
 
 /**
@@ -371,6 +371,12 @@ export const lock = {
   setBiometric: (enabled: boolean) => call<LockStatus>("lock_biometric_set", { enabled }),
   setAutoLock: (seconds: number) => call<LockStatus>("lock_auto_set", { seconds }),
   lockNow: () => call<LockStatus>("lock_now"),
+  /**
+   * Confirms the PIN for guarded actions (export, restore, biometric and
+   * auto-lock changes, destructive recovery) for the next minute. Counts
+   * against the same attempt limit as unlocking.
+   */
+  stepUp: (pin: string) => call<LockStatus>("lock_step_up", { pin }),
 };
 
 export interface BackupCounts {
@@ -403,11 +409,6 @@ export const backup = {
 export const recovery = {
   /** Tries again after a failure that may have passed. */
   retry: () => call<LockStatus>("recovery_retry"),
-  /**
-   * Confirms the PIN for the destructive recovery steps (restore over the
-   * unreadable data, start fresh). Needed whenever a valid lock exists.
-   */
-  authenticate: (pin: string) => call<LockStatus>("recovery_authenticate", { pin }),
   /**
    * Discards unreadable data and starts with an empty database. Needs the PIN
    * (when a lock exists) and the word typed to confirm that all existing data

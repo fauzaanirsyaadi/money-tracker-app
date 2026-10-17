@@ -4,7 +4,7 @@
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Field from "$lib/components/Field.svelte";
-  import { dataChanged, notify, refreshLock } from "$lib/session.svelte";
+  import { dataChanged, guarded, notify, refreshLock } from "$lib/session.svelte";
 
   /**
    * On the recovery screen the current data is unreadable: the restore builds a
@@ -61,7 +61,7 @@
     restoreError = "";
     step = "working";
     try {
-      const counts: BackupCounts = await backup.restoreCommit();
+      const counts: BackupCounts = await guarded(() => backup.restoreCommit());
       notify(`Data dipulihkan: ${counts.accounts} rekening, ${counts.transactions} transaksi.`, 7000);
       reset();
       // The storage problem (if any) is gone and the lock was reset: learn the new state.

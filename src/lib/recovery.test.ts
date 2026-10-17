@@ -45,11 +45,11 @@ test("only the exact word confirms losing the data", () => {
 });
 
 test("the PIN is asked first whenever a valid lock exists and was not just confirmed", () => {
-  assert.equal(needsPin({ configured: true, broken: false, recoveryAuthenticated: false }), true);
-  assert.equal(needsPin({ configured: true, broken: false, recoveryAuthenticated: true }), false);
+  assert.equal(needsPin({ configured: true, broken: false, stepUpActive: false }), true);
+  assert.equal(needsPin({ configured: true, broken: false, stepUpActive: true }), false);
   // No lock, or a damaged lock file that cannot be checked against: no PIN to ask for.
-  assert.equal(needsPin({ configured: false, broken: false, recoveryAuthenticated: false }), false);
-  assert.equal(needsPin({ configured: true, broken: true, recoveryAuthenticated: false }), false);
+  assert.equal(needsPin({ configured: false, broken: false, stepUpActive: false }), false);
+  assert.equal(needsPin({ configured: true, broken: true, stepUpActive: false }), false);
 });
 
 test("a few failed retries show nothing yet, persistent ones explain the way out", () => {

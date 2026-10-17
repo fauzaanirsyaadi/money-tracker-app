@@ -7,7 +7,7 @@
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
   import { autoLockLabel, newPinProblem } from "$lib/lock";
-  import { applyLockStatus, lockState, notify } from "$lib/session.svelte";
+  import { applyLockStatus, guarded, lockState, notify } from "$lib/session.svelte";
 
   const status = $derived(lockState.status as LockStatus);
 
@@ -76,7 +76,7 @@
   const toggleBiometric = (event: Event) => {
     const enabled = (event.currentTarget as HTMLInputElement).checked;
     void run(
-      () => lock.setBiometric(enabled),
+      () => guarded(() => lock.setBiometric(enabled)),
       enabled ? "Buka dengan biometrik diaktifkan." : "Buka dengan biometrik dimatikan.",
     );
   };
@@ -150,7 +150,10 @@
           options={choices}
           bind:value={autoLockText}
           onchange={(value) =>
-            run(() => lock.setAutoLock(Number(value)), "Pengaturan kunci otomatis disimpan.")}
+            run(
+              () => guarded(() => lock.setAutoLock(Number(value))),
+              "Pengaturan kunci otomatis disimpan.",
+            )}
         />
       </div>
 

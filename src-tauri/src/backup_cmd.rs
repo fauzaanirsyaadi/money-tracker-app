@@ -185,6 +185,8 @@ pub async fn backup_export(
     name: String,
 ) -> Result<ExportDto, AppError> {
     require_unlocked(&state)?;
+    // Taking all the data out of the app: a fresh PIN, before anything is read.
+    crate::lock::require_step_up(&state, Instant::now())?;
     mt_backup::validate_passphrase(&passphrase)
         .map_err(|problem| AppError::from(BackupFailure::WeakPassphrase(problem)))?;
 
@@ -348,11 +350,10 @@ pub async fn backup_restore_commit(
 ) -> Result<CountsDto, AppError> {
     require_unlocked_or_recovering(&state)?;
     let recovering = state.recovering();
-    if recovering {
-        // Before the staged restore is touched: a refusal must leave it waiting,
-        // so that entering the PIN and trying again is all that is needed.
-        crate::recovery::require_recovery_authority(&state, Instant::now())?;
-    }
+    // Replacing the data is destructive in both cases: a fresh PIN while a valid
+    // lock exists. Checked before the staged restore is touched, so a refusal
+    // leaves it waiting and entering the PIN and trying again is all that is needed.
+    crate::lock::require_step_up(&state, Instant::now())?;
     let staged = state
         .restore_session(|s| s.staged.take())
         .ok_or_else(|| AppError::invalid("no verified backup is waiting"))?;
@@ -364,14 +365,16 @@ pub async fn backup_restore_commit(
         }
     });
 
-    blocking(move || {
+    let worker = app.clone();
+    let outcome = blocking(move || {
+        let app = worker;
         let state = app.state::<AppState>();
         match (recovering, fresh_key) {
             (true, Some(key)) => {
                 // Replacing unreadable data is destructive: the PIN first when a
                 // valid lock exists, and a second look that still finds the data
                 // unreadable.
-                crate::recovery::require_recovery_authority(&state, Instant::now())?;
+                crate::lock::require_step_up(&state, Instant::now())?;
                 crate::recovery::recheck_before_destroying(&app, &state)?;
                 commit_recovery(&app, &state, &staged, &key)
             }
@@ -379,7 +382,10 @@ pub async fn backup_restore_commit(
             (false, _) => commit(&app, &state, &staged),
         }
     })
-    .await
+    .await;
+    // One confirmation, one replacement: the next guarded action asks again.
+    state.clear_step_up();
+    outcome
 }
 
 /// Replaces data that cannot be read with the staged one, under a new key.

@@ -13,9 +13,9 @@ export function confirmationMatches(typed: string): boolean {
 export function needsPin(status: {
   configured: boolean;
   broken: boolean;
-  recoveryAuthenticated: boolean;
+  stepUpActive: boolean;
 }): boolean {
-  return status.configured && !status.broken && !status.recoveryAuthenticated;
+  return status.configured && !status.broken && !status.stepUpActive;
 }
 
 /** Consecutive "try again" failures after which the screen explains the way out. */

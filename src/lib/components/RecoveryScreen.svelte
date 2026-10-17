@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ApiError, recovery } from "$lib/api";
+  import { ApiError, lock, recovery } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
   import Card from "$lib/components/Card.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -12,7 +12,14 @@
     retryAdvice,
     START_FRESH_WORD,
   } from "$lib/recovery";
-  import { applyLockStatus, dataChanged, lockState, notify, refreshLock } from "$lib/session.svelte";
+  import {
+    applyLockStatus,
+    dataChanged,
+    guarded,
+    lockState,
+    notify,
+    refreshLock,
+  } from "$lib/session.svelte";
 
   const text = $derived(recoveryText(lockState.status?.storage ?? "ok"));
   // A valid lock guards the destructive steps: the PIN comes first.
@@ -34,7 +41,7 @@
     const attempt = pin;
     pin = "";
     try {
-      applyLockStatus(await recovery.authenticate(attempt));
+      applyLockStatus(await lock.stepUp(attempt));
     } catch (err) {
       if (!(err instanceof ApiError)) throw err;
       message =
@@ -73,7 +80,7 @@
     busy = true;
     message = "";
     try {
-      applyLockStatus(await recovery.startFresh(typed));
+      applyLockStatus(await guarded(() => recovery.startFresh(typed)));
       notify("Database baru dibuat. Data lama dibuang.", 7000);
       dataChanged();
     } catch (err) {

@@ -10,8 +10,12 @@ use mt_storage::{Db, DbKey, LogicalSummary};
 
 use crate::{applock::LockService, error::AppError, vault::RecoveryReason};
 
-/// How long a correct PIN keeps the destructive recovery steps available.
-pub const RECOVERY_AUTH_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// How long a correct PIN keeps the guarded actions available (export, restore,
+/// biometric and auto-lock changes, the destructive recovery steps).
+///
+/// Short on purpose: an unlocked phone handed to someone else must not stay one
+/// tap away from exporting or replacing all the data.
+pub const STEP_UP_WINDOW: Duration = Duration::from_secs(60);
 
 /// Why the data cannot be used right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,8 +52,9 @@ pub struct AppState {
     lock: LockService,
     restore: Mutex<RestoreSession>,
     problem: Mutex<Option<StorageProblem>>,
-    /// When the PIN was last confirmed on the recovery screen (in memory only).
-    recovery_auth: Mutex<Option<Instant>>,
+    /// When the PIN was last confirmed for a guarded action, and the lock
+    /// generation it was made under (in memory only).
+    step_up: Mutex<Option<(Instant, u64)>>,
 }
 
 impl AppState {
@@ -59,7 +64,7 @@ impl AppState {
             lock,
             restore: Mutex::new(RestoreSession::default()),
             problem: Mutex::new(None),
-            recovery_auth: Mutex::new(None),
+            step_up: Mutex::new(None),
         }
     }
 
@@ -71,26 +76,27 @@ impl AppState {
         *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = problem;
         if problem.is_none() {
             // A resolved problem leaves no standing permission behind.
-            self.clear_recovery_auth();
+            self.clear_step_up();
         }
     }
 
-    /// Records that the PIN was just confirmed for the destructive recovery steps.
-    pub fn grant_recovery_auth(&self, now: Instant) {
-        *self
-            .recovery_auth
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(now);
+    /// Records that the PIN was just confirmed for guarded actions.
+    pub fn grant_step_up(&self, now: Instant) {
+        let generation = self.lock.lock_generation();
+        *self.step_up.lock().unwrap_or_else(PoisonError::into_inner) = Some((now, generation));
     }
 
-    /// Whether a PIN confirmation is still fresh. An expired one is forgotten.
-    pub fn recovery_auth_valid(&self, now: Instant) -> bool {
-        let mut guard = self
-            .recovery_auth
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+    /// Whether a PIN confirmation is still fresh. It lapses after
+    /// [`STEP_UP_WINDOW`] and as soon as the lock engages; a lapsed one is forgotten.
+    pub fn step_up_valid(&self, now: Instant) -> bool {
+        let mut guard = self.step_up.lock().unwrap_or_else(PoisonError::into_inner);
         match *guard {
-            Some(at) if now.saturating_duration_since(at) < RECOVERY_AUTH_WINDOW => true,
+            Some((at, generation))
+                if now.saturating_duration_since(at) < STEP_UP_WINDOW
+                    && generation == self.lock.lock_generation() =>
+            {
+                true
+            }
             Some(_) => {
                 *guard = None;
                 false
@@ -99,11 +105,8 @@ impl AppState {
         }
     }
 
-    pub fn clear_recovery_auth(&self) {
-        *self
-            .recovery_auth
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
+    pub fn clear_step_up(&self) {
+        *self.step_up.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// Whether the data is lost or unreadable and recovery is on offer.

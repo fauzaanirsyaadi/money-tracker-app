@@ -82,10 +82,22 @@ struct Suspension {
     external_deadline: Option<Instant>,
 }
 
+impl Inner {
+    fn engage(&mut self) {
+        if !self.locked {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        self.locked = true;
+    }
+}
+
 struct Inner {
     record: Option<Record>,
     broken: bool,
     locked: bool,
+    /// Bumped every time the lock engages, so a PIN confirmation made before
+    /// cannot outlive it (see `AppState::step_up_valid`).
+    generation: u64,
     lockout_until: Option<Instant>,
     suspended: Option<Suspension>,
     /// End of the window opened by `begin_external_ui`. In memory only: a
@@ -141,6 +153,7 @@ impl LockService {
             record: None,
             broken: false,
             locked: false,
+            generation: 0,
             lockout_until: None,
             suspended: None,
             external_until: None,
@@ -173,6 +186,11 @@ impl LockService {
             path,
             inner: Mutex::new(inner),
         }
+    }
+
+    /// How many times the lock has engaged since start.
+    pub fn lock_generation(&self) -> u64 {
+        self.state().generation
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -260,7 +278,7 @@ impl LockService {
     pub fn lock_now(&self) {
         let mut inner = self.state();
         if inner.record.is_some() {
-            inner.locked = true;
+            inner.engage();
         }
     }
 
@@ -382,7 +400,7 @@ impl LockService {
             .unwrap_or(AutoLock::DEFAULT)
             .grace();
         if external_deadline.is_none() && grace.is_zero() {
-            inner.locked = true;
+            inner.engage();
         } else {
             inner.suspended = Some(Suspension {
                 mono: now,
@@ -419,7 +437,7 @@ impl LockService {
             clock_went_back || mono >= grace || elapsed >= grace
         };
         if expired {
-            inner.locked = true;
+            inner.engage();
         }
     }
 }

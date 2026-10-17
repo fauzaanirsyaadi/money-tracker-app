@@ -9,6 +9,7 @@
   import LockScreen from "$lib/components/LockScreen.svelte";
   import QuickAdd from "$lib/components/QuickAdd.svelte";
   import RecoveryScreen from "$lib/components/RecoveryScreen.svelte";
+  import StepUpSheet from "$lib/components/StepUpSheet.svelte";
   import { isoDate } from "$lib/dates";
   import { isDarkTheme, loadTheme, nextTheme, saveTheme, type ThemePref } from "$lib/prefs";
   import {
@@ -187,6 +188,8 @@
 
   <QuickAdd />
 {/if}
+
+<StepUpSheet />
 
 {#if lockState.covered && unlocked}
   <div class="cover" aria-hidden="true"></div>

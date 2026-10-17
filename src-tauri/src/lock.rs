@@ -35,8 +35,8 @@ pub struct LockStatusDto {
     /// `ok`, `retry`, or why the data needs recovery: `database_missing`,
     /// `key_missing`, `key_unusable`, `database_unreadable`.
     pub storage: &'static str,
-    /// The PIN was confirmed recently for the destructive recovery steps.
-    pub recovery_authenticated: bool,
+    /// The PIN was confirmed within the last minute for guarded actions.
+    pub step_up_active: bool,
 }
 
 impl LockStatusDto {
@@ -44,7 +44,7 @@ impl LockStatusDto {
         snapshot: LockSnapshot,
         biometric: BiometricAvailability,
         storage: &'static str,
-        recovery_authenticated: bool,
+        step_up_active: bool,
     ) -> Self {
         Self {
             configured: snapshot.configured,
@@ -62,7 +62,7 @@ impl LockStatusDto {
                 .retry_after
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             storage,
-            recovery_authenticated,
+            step_up_active,
         }
     }
 }
@@ -113,8 +113,30 @@ pub(crate) async fn status_of(app: &AppHandle) -> LockStatusDto {
         snapshot,
         biometric,
         storage_label(state.problem()),
-        state.recovery_auth_valid(Instant::now()),
+        state.step_up_valid(Instant::now()),
     )
+}
+
+/// Whether a valid, readable app lock exists to ask a PIN of. A damaged
+/// `lock.json` cannot be checked against, so it does not block.
+pub fn pin_required(state: &AppState) -> bool {
+    let lock = state.applock().snapshot(Instant::now());
+    lock.configured && !lock.broken
+}
+
+/// Guarded actions need a PIN confirmed within [`crate::state::STEP_UP_WINDOW`]
+/// while a valid lock exists. Pure refusal: nothing is counted or changed here;
+/// guesses are made (and limited) in [`lock_step_up`] through the same counter
+/// as unlocking.
+pub fn require_step_up(state: &AppState, now: Instant) -> Result<(), AppError> {
+    if !pin_required(state) || state.step_up_valid(now) {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            ErrorCode::PinRequired,
+            "enter the PIN to continue",
+        ))
+    }
 }
 
 pub(crate) fn require_unlocked(state: &AppState) -> Result<(), AppError> {
@@ -241,6 +263,47 @@ pub async fn lock_remove(
     Ok(status_of(&app).await)
 }
 
+/// Confirms the PIN for guarded actions (export, restore, biometric and
+/// auto-lock changes, the destructive recovery steps) for the next minute.
+///
+/// A guess here is a guess like any other: it goes through `verify_pin`, so it
+/// counts against the same persisted limit and backoff as unlocking and cannot
+/// be used to try PINs more often. Allowed while unlocked, or while the data is
+/// being recovered (the app is locked then but there is no database to unlock).
+#[tauri::command]
+pub async fn lock_step_up(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    pin: Zeroizing<String>,
+) -> Result<LockStatusDto, AppError> {
+    if state.applock().is_locked() && !state.recovering() {
+        return Err(AppError::locked());
+    }
+    blocking(&app, move |app| {
+        let state = app.state::<AppState>();
+        let now = Instant::now();
+        if pin_required(&state) {
+            state.applock().verify_pin(&pin, now)?;
+        }
+        state.grant_step_up(now);
+        Ok(())
+    })
+    .await?;
+    Ok(status_of(&app).await)
+}
+
+/// Whether moving from `current` to `wanted` seconds of grace weakens the lock
+/// (the app may then stay readable in the background for longer).
+pub(crate) fn weakens_auto_lock(current: u32, wanted: u32) -> Result<bool, AppError> {
+    use mt_core::AutoLock;
+    let wanted = AutoLock::from_seconds(wanted)
+        .ok_or_else(|| AppError::invalid("unsupported auto-lock choice"))?;
+    // A stored value this build does not know is treated as the strictest, so
+    // that any change from it needs the PIN.
+    let current = AutoLock::from_seconds(current).unwrap_or(AutoLock::Immediately);
+    Ok(wanted.grace() > current.grace())
+}
+
 /// Enables or disables biometric unlock. Enabling proves it works first.
 #[tauri::command]
 pub async fn lock_biometric_set(
@@ -249,6 +312,7 @@ pub async fn lock_biometric_set(
     enabled: bool,
 ) -> Result<LockStatusDto, AppError> {
     require_unlocked(&state)?;
+    require_step_up(&state, Instant::now())?;
     if enabled {
         let availability = app.mt_platform().biometric_availability().await;
         if availability.ok() != Some(BiometricAvailability::Available) {
@@ -282,6 +346,11 @@ pub async fn lock_auto_set(
     seconds: u32,
 ) -> Result<LockStatusDto, AppError> {
     require_unlocked(&state)?;
+    // Shortening the grace is always fine; lengthening it weakens the lock.
+    let current = state.applock().snapshot(Instant::now()).auto_lock_seconds;
+    if weakens_auto_lock(current, seconds)? {
+        require_step_up(&state, Instant::now())?;
+    }
     state.applock().set_auto_lock(seconds)?;
     Ok(status_of(&app).await)
 }
@@ -297,4 +366,230 @@ pub async fn lock_now(
         state.close_db();
     }
     Ok(status_of(&app).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::PathBuf, time::Duration};
+
+    use super::*;
+    use crate::{applock::LockService, state::STEP_UP_WINDOW};
+
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("mt-stepup-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const PIN: &str = "493017";
+
+    fn pin(text: &str) -> Zeroizing<String> {
+        Zeroizing::new(text.to_owned())
+    }
+
+    fn state_with_lock(dir: &Dir, with_pin: bool) -> AppState {
+        let lock = LockService::load(&dir.0, Instant::now());
+        if with_pin {
+            lock.set_pin(&pin(PIN)).unwrap();
+        }
+        AppState::new(None, lock)
+    }
+
+    /// What `lock_step_up` does, without the Tauri plumbing around it.
+    fn step_up(state: &AppState, attempt: &str, now: Instant) -> Result<(), AppError> {
+        if pin_required(state) {
+            state.applock().verify_pin(&pin(attempt), now)?;
+        }
+        state.grant_step_up(now);
+        Ok(())
+    }
+
+    #[test]
+    fn a_guarded_action_is_refused_without_a_step_up_and_allowed_with_one() {
+        let dir = Dir::new("basic");
+        let state = state_with_lock(&dir, true);
+        let now = Instant::now();
+        assert!(pin_required(&state));
+        assert_eq!(
+            require_step_up(&state, now).unwrap_err().code,
+            ErrorCode::PinRequired
+        );
+        step_up(&state, PIN, now).unwrap();
+        assert!(require_step_up(&state, now).is_ok());
+    }
+
+    #[test]
+    fn the_step_up_lapses_after_its_window_and_stays_lapsed() {
+        let dir = Dir::new("expiry");
+        let state = state_with_lock(&dir, true);
+        let now = Instant::now();
+        step_up(&state, PIN, now).unwrap();
+        assert_eq!(STEP_UP_WINDOW, Duration::from_secs(60));
+        let almost = now + STEP_UP_WINDOW - Duration::from_secs(1);
+        assert!(require_step_up(&state, almost).is_ok());
+        let late = now + STEP_UP_WINDOW + Duration::from_secs(1);
+        assert_eq!(
+            require_step_up(&state, late).unwrap_err().code,
+            ErrorCode::PinRequired
+        );
+        // Expiry is final: checking again "inside the old window" does not revive it.
+        assert!(!state.step_up_valid(almost));
+    }
+
+    #[test]
+    fn wrong_pins_grant_nothing_and_count_against_the_unlock_limit() {
+        let dir = Dir::new("shared-counter");
+        let state = state_with_lock(&dir, true);
+        let now = Instant::now();
+        for expected in 1..=4 {
+            let err = step_up(&state, "000001", now).unwrap_err();
+            assert_eq!(err.code, ErrorCode::WrongPin);
+            assert!(!state.step_up_valid(now));
+            assert_eq!(state.applock().snapshot(now).failed_attempts, expected);
+        }
+        // The fifth miss starts the same backoff the unlock screen would impose...
+        assert_eq!(
+            step_up(&state, "000001", now).unwrap_err().code,
+            ErrorCode::WrongPin
+        );
+        // ...and while it runs even the right PIN is refused, here as at unlock.
+        let err = step_up(&state, PIN, now).unwrap_err();
+        assert_eq!(err.code, ErrorCode::LockedOut);
+        assert!(!state.step_up_valid(now));
+        assert!(matches!(
+            state.applock().verify_pin(&pin(PIN), now),
+            Err(LockError::LockedOut(_))
+        ));
+        // After the delay the right PIN works again.
+        let later = now + Duration::from_secs(31);
+        step_up(&state, PIN, later).unwrap();
+        assert!(require_step_up(&state, later).is_ok());
+    }
+
+    #[test]
+    fn misses_at_unlock_and_at_step_up_add_up() {
+        let dir = Dir::new("mixed");
+        let state = state_with_lock(&dir, true);
+        let now = Instant::now();
+        state.applock().verify_pin(&pin("000001"), now).unwrap_err();
+        state.applock().verify_pin(&pin("000002"), now).unwrap_err();
+        step_up(&state, "000003", now).unwrap_err();
+        step_up(&state, "000004", now).unwrap_err();
+        assert_eq!(state.applock().snapshot(now).failed_attempts, 4);
+    }
+
+    #[test]
+    fn the_step_up_does_not_survive_the_lock_engaging() {
+        let dir = Dir::new("lock-clears");
+        let state = state_with_lock(&dir, true);
+        let now = Instant::now();
+        state.applock().mark_unlocked();
+        step_up(&state, PIN, now).unwrap();
+        state.applock().lock_now();
+        state.applock().mark_unlocked();
+        assert_eq!(
+            require_step_up(&state, now).unwrap_err().code,
+            ErrorCode::PinRequired,
+            "a confirmation made before a lock must not count after it"
+        );
+    }
+
+    #[test]
+    fn a_resolved_problem_leaves_no_standing_permission() {
+        let dir = Dir::new("cleared");
+        let state = state_with_lock(&dir, true);
+        let now = Instant::now();
+        step_up(&state, PIN, now).unwrap();
+        state.set_problem(None);
+        assert!(!state.step_up_valid(now));
+    }
+
+    #[test]
+    fn without_a_valid_lock_no_pin_can_be_asked_for() {
+        let dir = Dir::new("nolock");
+        let state = state_with_lock(&dir, false);
+        assert!(!pin_required(&state));
+        assert!(require_step_up(&state, Instant::now()).is_ok());
+
+        // A damaged lock.json cannot be checked against, so it does not block either.
+        let dir = Dir::new("brokenlock");
+        std::fs::write(dir.0.join(crate::applock::LOCK_FILE), b"{broken").unwrap();
+        let state = state_with_lock(&dir, false);
+        assert!(state.applock().snapshot(Instant::now()).broken);
+        assert!(!pin_required(&state));
+        assert!(require_step_up(&state, Instant::now()).is_ok());
+    }
+
+    #[test]
+    fn only_a_longer_grace_counts_as_weakening() {
+        // (current, wanted, weakens)
+        for (current, wanted, weakens) in [
+            (0, 30, true),
+            (0, 300, true),
+            (30, 60, true),
+            (60, 300, true),
+            (300, 60, false),
+            (300, 0, false),
+            (60, 60, false),
+            (0, 0, false),
+        ] {
+            assert_eq!(
+                weakens_auto_lock(current, wanted).unwrap(),
+                weakens,
+                "{current} -> {wanted}"
+            );
+        }
+        assert_eq!(
+            weakens_auto_lock(0, 45).unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+        // A stored value this build does not know counts as strictest.
+        assert!(weakens_auto_lock(999, 30).unwrap());
+    }
+
+    /// The command bodies need a running Tauri app, so their wiring is checked
+    /// in the source: every guarded command must ask for the step-up before it
+    /// does anything else that matters. (The device scripts exercise the real
+    /// commands end to end.)
+    #[test]
+    fn every_guarded_command_asks_for_the_step_up_first() {
+        fn body<'a>(source: &'a str, name: &str) -> &'a str {
+            let start = source
+                .find(&format!("pub async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} not found"));
+            let rest = &source[start..];
+            let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+            &rest[..end]
+        }
+        let lock = include_str!("lock.rs");
+        let backup = include_str!("backup_cmd.rs");
+        let recovery = include_str!("recovery.rs");
+
+        // (source, command, a marker for the first thing it does after the guard)
+        for (source, name, then) in [
+            (lock, "lock_biometric_set", "biometric_availability"),
+            (lock, "lock_auto_set", "set_auto_lock"),
+            (backup, "backup_export", "validate_passphrase"),
+            (backup, "backup_restore_commit", "staged.take()"),
+            (recovery, "recovery_start_fresh", "spawn_blocking"),
+        ] {
+            let text = body(source, name);
+            let guard = text
+                .find("require_step_up")
+                .unwrap_or_else(|| panic!("{name} has no step-up guard"));
+            let first = text.find(then).unwrap_or_else(|| panic!("{name}: {then}"));
+            assert!(guard < first, "{name} must check the step-up before {then}");
+        }
+    }
 }

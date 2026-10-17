@@ -6,7 +6,7 @@
   import Field from "$lib/components/Field.svelte";
   import { isoDate } from "$lib/dates";
   import RestoreCard from "$lib/components/RestoreCard.svelte";
-  import { notify } from "$lib/session.svelte";
+  import { guarded, notify } from "$lib/session.svelte";
 
   // --- export ---
   let passphrase = $state("");
@@ -28,7 +28,7 @@
     exportError = "";
     const secret = passphrase;
     try {
-      const result = await backup.export(secret, backupFileName(isoDate()));
+      const result = await guarded(() => backup.export(secret, backupFileName(isoDate())));
       if (result.saved) {
         notify(
           `Cadangan disimpan: ${result.counts.accounts} rekening, ${result.counts.transactions} transaksi.`,
