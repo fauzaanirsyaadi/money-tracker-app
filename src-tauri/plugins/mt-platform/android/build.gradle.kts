@@ -19,6 +19,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {
@@ -35,4 +39,7 @@ dependencies {
     implementation("androidx.activity:activity:1.10.1")
     // System fingerprint/face prompt. Apache-2.0, Google, stable 1.1.0 (BiometricPrompt, API 23+).
     implementation("androidx.biometric:biometric:1.1.0")
+
+    // JVM unit tests for the picker URI check. EPL-2.0, test scope only.
+    testImplementation("junit:junit:4.13.2")
 }

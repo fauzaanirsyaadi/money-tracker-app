@@ -96,10 +96,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       - run: pnpm tauri android build --apk --debug --target aarch64
-      - name: Kotlin unit tests (Keystore failure classification)
+      - name: Kotlin unit tests (Keystore classification, picker URIs)
         run: |
           cd src-tauri/gen/android
-          ./gradlew :tauri-plugin-mt-keystore:testDebugUnitTest
+          ./gradlew :tauri-plugin-mt-keystore:testDebugUnitTest :tauri-plugin-mt-platform:testDebugUnitTest
       - name: Release manifest must not request INTERNET
         run: |
           cd src-tauri/gen/android

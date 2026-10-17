@@ -1054,3 +1054,15 @@ Setelah tiga kegagalan beruntun layar menampilkan penjelasan, tanpa tindakan des
 ### Dicatat untuk kelompok 3
 
 Masa berlaku konfirmasi PIN pemulihan (5 menit) terlalu lama untuk tindakan yang menghapus data. Disamakan dengan mekanisme PIN ulang F11 (sekitar 60 detik).
+
+---
+
+## 28. Kelompok 2 (2026-10-17)
+
+| Temuan | Perbaikan | Bukti |
+|---|---|---|
+| **F9** Kebijakan frasa sandi diakali NFKC | Panjang minimum dan cek pengulangan diterapkan pada teks **asli dan** bentuk NFKC; yang lebih ketat menang (Rust dan cermin UI). NFKC bisa memperbesar (U+FDFA menjadi 18 karakter, ligatur ffi menjadi 3, U+337F menjadi 4) maupun memperkecil teks. *Koreksi:* U+FDFD **tidak** mengembang (tetap 1 karakter); karakter yang mengembang menjadi 18 adalah U+FDFA | tes U+FDFA, U+FDFD, ffi ×4, U+337F ×3 dan ×12, A lebar penuh, batas maksimum setelah ekspansi |
+| **F20** `DbKey` mencetak byte kunci | Newtype dengan `Debug` tersamar; penjaga CI diperluas (kata `key/pin/hash/blob/salt/token/secret/passphrase/password/nonce`, tipe `DbKey/Zeroizing`, `cfg_attr(derive(Debug))`, `impl Debug` manual yang tak menyamarkan) | tes `DbKey` di `Option/Vec/Result/{:#?}`; 5 tes baru penjaga |
+| **F15** `securityLevel()` bisa membuat kunci | Memakai kunci yang ada (`keyOrGone`), tidak pernah membuat | dikerjakan bersama alias bernomor versi |
+| **F19** Zeroization | `argon2` dengan fitur `zeroize`; `chacha20poly1305` memang sudah menghapus kunci dan state saat di-drop; PIN dan frasa sandi diterima perintah langsung sebagai `Zeroizing<String>` (fitur `serde` pada `zeroize`) | tes deserialisasi |
+| **F7** URI SAF tanpa pemeriksaan skema | `SafUri.isAcceptable`: hanya `content://` milik aplikasi lain; `file://`, skema lain, authority kosong, dan provider milik sendiri (termasuk dengan user-info/port) ditolak, di kedua callback | 6 tes JVM Kotlin (dijalankan CI) |

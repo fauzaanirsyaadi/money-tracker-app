@@ -159,6 +159,11 @@ class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
             reply(invoke, "cancelled")
             return
         }
+        // Only a content:// URI of another app: never file:// or one of our own.
+        if (!SafUri.isAcceptable(uri.scheme, uri.authority, activity.packageName)) {
+            invoke.reject("uri")
+            return
+        }
         val args = invoke.parseArgs(SaveArgs::class.java)
         val source = insideCache(args.source)
         if (source == null) {
@@ -197,6 +202,10 @@ class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
         val uri = result.data?.data
         if (result.resultCode != Activity.RESULT_OK || uri == null) {
             reply(invoke, "cancelled")
+            return
+        }
+        if (!SafUri.isAcceptable(uri.scheme, uri.authority, activity.packageName)) {
+            invoke.reject("uri")
             return
         }
         val args = invoke.parseArgs(PickArgs::class.java)
