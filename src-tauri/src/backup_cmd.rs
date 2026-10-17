@@ -214,6 +214,12 @@ pub async fn backup_export(
         }
     };
 
+    // The dump and the key derivation take a while: the app may have locked meanwhile,
+    // and a locked app must not open a picker (or a grace window).
+    if let Err(err) = require_unlocked(&state) {
+        let _ = fs::remove_file(&temp);
+        return Err(err);
+    }
     // The picker pauses the app; the lock must not fire while it is open.
     state.applock().begin_external_ui(Instant::now());
     let outcome = app
@@ -301,6 +307,9 @@ pub async fn backup_restore_prepare(
     state: State<'_, AppState>,
     passphrase: Zeroizing<String>,
 ) -> Result<RestorePreviewDto, AppError> {
+    // It rebuilds the staged database that commit and start-fresh also use: one
+    // storage operation at a time.
+    let _op = state.storage_mutex().lock().await;
     require_unlocked_or_recovering(&state)?;
     let recovering = state.recovering();
     let picked = state

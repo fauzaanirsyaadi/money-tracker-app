@@ -94,6 +94,10 @@ impl Record {
 struct Suspension {
     mono: Instant,
     wall: SystemTime,
+    /// Time since boot, *including* time the device spent asleep (the monotonic
+    /// clock stops in deep sleep, and the wall clock can be set by whoever holds
+    /// the phone), when the platform can tell.
+    boot: Option<Duration>,
     /// Set when the app left for a system picker that we launched: it may stay
     /// away until this moment regardless of the auto-lock choice.
     external_deadline: Option<Instant>,
@@ -117,9 +121,20 @@ struct Inner {
     generation: u64,
     lockout_until: Option<Instant>,
     suspended: Option<Suspension>,
+    /// Where "time since boot" comes from; replaced in tests.
+    boot_clock: fn() -> Option<Duration>,
     /// End of the window opened by `begin_external_ui`. In memory only: a
     /// process that dies while the picker is open comes back locked.
     external_until: Option<Instant>,
+}
+
+/// Time since boot including deep sleep (`/proc/uptime`: CLOCK_BOOTTIME), or None
+/// where the platform has no such file. Neither the monotonic clock (which stops
+/// while the device sleeps) nor the wall clock (which the user can set) can stand in.
+fn boot_elapsed() -> Option<Duration> {
+    let text = fs::read_to_string("/proc/uptime").ok()?;
+    let seconds: f64 = text.split_whitespace().next()?.parse().ok()?;
+    (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds))
 }
 
 pub struct LockService {
@@ -173,6 +188,7 @@ impl LockService {
             generation: 0,
             lockout_until: None,
             suspended: None,
+            boot_clock: boot_elapsed,
             external_until: None,
         };
         match fs::read(&path) {
@@ -208,6 +224,20 @@ impl LockService {
     /// How many times the lock has engaged since start.
     pub fn lock_generation(&self) -> u64 {
         self.state().generation
+    }
+
+    /// Whether the app is locked **and** the generation, read together under one
+    /// lock acquisition: reading them separately leaves a gap in which the lock can
+    /// engage, and a PIN confirmation stamped with the later generation would then
+    /// belong to a lock the user never confirmed.
+    pub fn locked_and_generation(&self) -> (bool, u64) {
+        let inner = self.state();
+        (inner.locked, inner.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_boot_clock(&self, clock: fn() -> Option<Duration>) {
+        self.state().boot_clock = clock;
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -470,9 +500,11 @@ impl LockService {
         if inner.locked {
             // Already locked, but the departure still matters: an unlock may be
             // in progress and finish after the app is gone (see `mark_unlocked`).
+            let boot = (inner.boot_clock)();
             inner.suspended = Some(Suspension {
                 mono: now,
                 wall,
+                boot,
                 external_deadline,
             });
             return;
@@ -483,9 +515,11 @@ impl LockService {
         if external_deadline.is_none() && grace.is_zero() {
             inner.engage();
         } else {
+            let boot = (inner.boot_clock)();
             inner.suspended = Some(Suspension {
                 mono: now,
                 wall,
+                boot,
                 external_deadline,
             });
         }
@@ -507,20 +541,35 @@ impl LockService {
             return;
         };
         let clock_went_back = wall.duration_since(away.wall).is_err();
+        // Time away by the boot clock: None when it cannot be read (then the other
+        // two clocks decide as before); a clock that went backwards means a reboot,
+        // which locks.
+        let boot_away = match (away.boot, (inner.boot_clock)()) {
+            (Some(then), Some(now_boot)) => match now_boot.checked_sub(then) {
+                Some(away_for) => Some(away_for),
+                None => return inner.engage(),
+            },
+            _ => None,
+        };
         if away.external_deadline.is_some() {
             // The picker we launched has returned: its window is spent, whether
             // or not the command awaiting it has reported back yet.
             inner.external_until = None;
         }
         let expired = if let Some(deadline) = away.external_deadline {
-            now > deadline || clock_went_back
+            now > deadline
+                || clock_went_back
+                || boot_away.is_some_and(|away_for| away_for > EXTERNAL_UI_MAX)
         } else {
             let grace = AutoLock::from_seconds(seconds)
                 .unwrap_or(AutoLock::DEFAULT)
                 .grace();
             let mono = now.saturating_duration_since(away.mono);
             let elapsed = wall.duration_since(away.wall).unwrap_or_default();
-            clock_went_back || mono >= grace || elapsed >= grace
+            clock_went_back
+                || mono >= grace
+                || elapsed >= grace
+                || boot_away.is_some_and(|away_for| away_for >= grace)
         };
         if expired {
             inner.engage();
@@ -1144,5 +1193,108 @@ mod tests {
             "PIN check (19 MiB, t=2, p=1): {:?} per attempt",
             started.elapsed() / 5
         );
+    }
+
+    // --- the boot clock: deep sleep and a wall clock set back -------------------------
+
+    thread_local! {
+        static BOOT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    }
+
+    fn fake_boot() -> Option<Duration> {
+        BOOT.with(std::cell::Cell::get)
+    }
+
+    fn boot_at(seconds: u64) {
+        BOOT.with(|b| b.set(Some(Duration::from_secs(seconds))));
+    }
+
+    #[test]
+    fn a_wall_clock_set_back_by_less_than_the_time_away_no_longer_stretches_the_grace() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.set_auto_lock(300).unwrap();
+        service.set_boot_clock(fake_boot);
+        let wall = SystemTime::now();
+        service.mark_unlocked();
+
+        // The phone sleeps for an hour (the monotonic clock barely moves in deep sleep),
+        // and whoever holds it sets the wall clock back by that hour. By the wall and
+        // monotonic clocks nothing happened; the boot clock knows better.
+        boot_at(1_000);
+        service.on_suspended(now, wall);
+        boot_at(1_000 + 3_600);
+        service.on_resumed(now + Duration::from_secs(2), wall);
+        assert!(
+            service.is_locked(),
+            "an hour away must lock a five-minute grace"
+        );
+    }
+
+    #[test]
+    fn the_boot_clock_does_not_lock_a_short_absence_nor_change_anything_when_unreadable() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.set_auto_lock(300).unwrap();
+        service.set_boot_clock(fake_boot);
+        let wall = SystemTime::now();
+
+        service.mark_unlocked();
+        boot_at(500);
+        service.on_suspended(now, wall);
+        boot_at(520); // twenty seconds away
+        service.on_resumed(
+            now + Duration::from_secs(20),
+            wall + Duration::from_secs(20),
+        );
+        assert!(!service.is_locked());
+
+        // Unreadable (no /proc/uptime): the other two clocks decide, as before.
+        BOOT.with(|b| b.set(None));
+        service.on_suspended(now, wall);
+        service.on_resumed(
+            now + Duration::from_secs(20),
+            wall + Duration::from_secs(20),
+        );
+        assert!(!service.is_locked());
+        service.on_suspended(now, wall);
+        service.on_resumed(
+            now + Duration::from_secs(400),
+            wall + Duration::from_secs(400),
+        );
+        assert!(service.is_locked());
+    }
+
+    #[test]
+    fn a_boot_clock_that_went_backwards_means_a_reboot_and_locks() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.set_auto_lock(300).unwrap();
+        service.set_boot_clock(fake_boot);
+        service.mark_unlocked();
+        boot_at(5_000);
+        service.on_suspended(now, SystemTime::now());
+        boot_at(30);
+        service.on_resumed(now + Duration::from_secs(1), SystemTime::now());
+        assert!(service.is_locked());
+    }
+
+    #[test]
+    fn the_picker_window_is_also_bounded_by_the_boot_clock() {
+        let dir = Dir::new();
+        let (service, now) = fresh(&dir);
+        service.set_pin(&pin("493017")).unwrap();
+        service.set_boot_clock(fake_boot);
+        service.mark_unlocked();
+        let wall = SystemTime::now();
+        boot_at(100);
+        service.begin_external_ui(now);
+        service.on_suspended(now, wall);
+        boot_at(100 + 3_600);
+        service.on_resumed(now + Duration::from_secs(2), wall); // the clocks the user can set say 2 s
+        assert!(service.is_locked(), "an hour away is not a picker visit");
     }
 }

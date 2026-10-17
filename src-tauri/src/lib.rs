@@ -78,7 +78,10 @@ pub fn run() {
     // lock is enforced here, not in the WebView, which may be frozen by then.
     #[cfg(mobile)]
     let builder = builder.on_window_event(|window, event| {
-        let state = window.app_handle().state::<AppState>();
+        // A window can exist (and report events) before `setup` has managed the state.
+        let Some(state) = window.app_handle().try_state::<AppState>() else {
+            return;
+        };
         // The main thread must never wait for start-up (start-up waits for the
         // main thread). Before it is done the app starts locked anyway, so an
         // event that arrives earlier loses nothing.

@@ -325,17 +325,18 @@ pub async fn lock_remove(
 #[tauri::command]
 pub async fn lock_step_up(
     app: AppHandle,
-    state: State<'_, AppState>,
     pin: Zeroizing<String>,
 ) -> Result<LockStatusDto, AppError> {
-    if state.applock().is_locked() && !state.recovering() {
-        return Err(AppError::locked());
-    }
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         let now = Instant::now();
-        // The generation the PIN is submitted under, read before the (slow) check.
-        let generation = state.applock().lock_generation();
+        // "Locked?" and the generation are read together, once, before the (slow)
+        // PIN check: a lock that engages afterwards leaves the confirmation stale
+        // (see `grant_step_up`), and one that engaged before is refused here.
+        let (locked, generation) = state.applock().locked_and_generation();
+        if locked && !state.recovering() {
+            return Err(AppError::locked());
+        }
         if pin_required(&state) {
             state.applock().verify_pin(&pin, now)?;
         }
@@ -479,7 +480,10 @@ mod tests {
 
     /// What `lock_step_up` does, without the Tauri plumbing around it.
     fn step_up(state: &AppState, attempt: &str, now: Instant) -> Result<(), AppError> {
-        let generation = state.applock().lock_generation();
+        let (locked, generation) = state.applock().locked_and_generation();
+        if locked && !state.recovering() {
+            return Err(AppError::locked());
+        }
         if pin_required(state) {
             state.applock().verify_pin(&pin(attempt), now)?;
         }
@@ -575,6 +579,25 @@ mod tests {
             ErrorCode::PinRequired,
             "a confirmation made before a lock must not count after it"
         );
+    }
+
+    #[test]
+    fn a_step_up_is_refused_while_locked_and_the_two_reads_agree() {
+        let dir = Dir::new("born-locked");
+        let state = state_with_lock(&dir, true);
+        // Locked (the app was just backgrounded): a step-up is not something a locked app grants.
+        state.applock().lock_now();
+        assert!(state.applock().locked_and_generation().0);
+        let err = step_up(&state, PIN, Instant::now()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Locked);
+        assert!(!state.step_up_valid(Instant::now()));
+        // Unlocked, it is granted, under the generation read in the same breath.
+        state.applock().mark_unlocked();
+        let (locked, generation) = state.applock().locked_and_generation();
+        assert!(!locked);
+        assert_eq!(generation, state.applock().lock_generation());
+        step_up(&state, PIN, Instant::now()).unwrap();
+        assert!(state.step_up_valid(Instant::now()));
     }
 
     #[test]
