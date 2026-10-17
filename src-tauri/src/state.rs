@@ -52,6 +52,10 @@ pub struct AppState {
     lock: LockService,
     restore: Mutex<RestoreSession>,
     problem: Mutex<Option<StorageProblem>>,
+    /// Serialises everything that changes which files are the live data or
+    /// whether they are open: a restore commit, `initialize`, start fresh and the
+    /// unlock that opens the database. See [`AppState::storage_mutex`].
+    storage_op: tauri::async_runtime::Mutex<()>,
     /// When the PIN was last confirmed for a guarded action, and the lock
     /// generation it was made under (in memory only).
     step_up: Mutex<Option<(Instant, u64)>>,
@@ -64,6 +68,7 @@ impl AppState {
             lock,
             restore: Mutex::new(RestoreSession::default()),
             problem: Mutex::new(None),
+            storage_op: tauri::async_runtime::Mutex::new(()),
             step_up: Mutex::new(None),
         }
     }
@@ -112,6 +117,23 @@ impl AppState {
     /// Whether the data is lost or unreadable and recovery is on offer.
     pub fn recovering(&self) -> bool {
         matches!(self.problem(), Some(StorageProblem::Recovery(_)))
+    }
+
+    /// The one lock around every storage-changing operation (F14).
+    ///
+    /// Take it with `.lock().await` at the top of an **async command**, before
+    /// the work is handed to `spawn_blocking`, and keep the guard until that work
+    /// is done. Rules that keep it from ever deadlocking:
+    /// * only async commands take it, never a synchronous command or the
+    ///   lifecycle hook, which run on the main thread: the main thread must stay
+    ///   free to serve the Kotlin calls the blocked work is waiting for;
+    /// * the functions it protects (`initialize`, `commit_recovery`, ...) never
+    ///   take it themselves, so nothing takes it twice;
+    /// * re-check what the command assumed (is there still something to recover,
+    ///   is a restore still staged) *after* taking it, since another command may
+    ///   have finished first.
+    pub fn storage_mutex(&self) -> &tauri::async_runtime::Mutex<()> {
+        &self.storage_op
     }
 
     pub fn applock(&self) -> &LockService {
@@ -243,5 +265,147 @@ mod tests {
             crate::error::ErrorCode::Unavailable
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // --- F14: one storage operation at a time, and never a deadlock ---------------
+
+    /// Many commands race for the storage mutex while "Kotlin" is served by a
+    /// main-thread stand-in that, like the real main thread, never takes it. The
+    /// blocked work waits on that thread (the lesson of the earlier ANR): if the
+    /// mutex were ever held by, or waited on from, the main thread this would hang.
+    #[test]
+    fn concurrent_storage_operations_serialise_and_never_deadlock() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        };
+
+        let (state, dir) = open_state("concurrent", true);
+        state.applock().mark_unlocked();
+        let state = Arc::new(state);
+
+        // The stand-in for the UI thread: answers requests, and also does the
+        // synchronous things the lifecycle hook and sync commands do.
+        let (to_main, requests) = mpsc::channel::<mpsc::Sender<()>>();
+        let main_state = Arc::clone(&state);
+        let main = std::thread::spawn(move || {
+            while let Ok(reply) = requests.recv() {
+                let _ = main_state.with_db(|_| Ok(()));
+                main_state
+                    .applock()
+                    .on_suspended(Instant::now(), std::time::SystemTime::now());
+                main_state
+                    .applock()
+                    .on_resumed(Instant::now(), std::time::SystemTime::now());
+                let _ = reply.send(());
+            }
+        });
+
+        let inside = Arc::new(AtomicUsize::new(0));
+        let widest = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicUsize::new(0));
+        let (finished, wait) = mpsc::channel::<()>();
+
+        let runner = {
+            let (state, inside, widest, done) = (
+                Arc::clone(&state),
+                Arc::clone(&inside),
+                Arc::clone(&widest),
+                Arc::clone(&done),
+            );
+            std::thread::spawn(move || {
+                tauri::async_runtime::block_on(async move {
+                    let mut tasks = Vec::new();
+                    for _ in 0..24 {
+                        let (state, inside, widest, done, to_main) = (
+                            Arc::clone(&state),
+                            Arc::clone(&inside),
+                            Arc::clone(&widest),
+                            Arc::clone(&done),
+                            to_main.clone(),
+                        );
+                        tasks.push(tauri::async_runtime::spawn(async move {
+                            // Taken in the async command, held across the blocking work.
+                            let _op = state.storage_mutex().lock().await;
+                            tauri::async_runtime::spawn_blocking(move || {
+                                let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                                widest.fetch_max(now, Ordering::SeqCst);
+                                // "Call into Kotlin": wait for the main thread.
+                                let (reply, answered) = mpsc::channel();
+                                to_main.send(reply).unwrap();
+                                answered.recv().unwrap();
+                                std::thread::sleep(std::time::Duration::from_millis(2));
+                                inside.fetch_sub(1, Ordering::SeqCst);
+                                done.fetch_add(1, Ordering::SeqCst);
+                            })
+                            .await
+                            .unwrap();
+                        }));
+                    }
+                    for task in tasks {
+                        task.await.unwrap();
+                    }
+                });
+                let _ = finished.send(());
+            })
+        };
+
+        wait.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("storage operations deadlocked");
+        runner.join().unwrap();
+        assert_eq!(done.load(Ordering::SeqCst), 24);
+        assert_eq!(widest.load(Ordering::SeqCst), 1, "operations overlapped");
+        drop(state);
+        let _ = main;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Wiring, checked in the source (the command bodies need a running app): the
+    /// storage-changing async commands take the mutex before anything else, and
+    /// the main-thread lifecycle hook never does.
+    #[test]
+    fn the_storage_commands_take_the_mutex_and_the_main_thread_never_does() {
+        fn body<'a>(source: &'a str, name: &str) -> &'a str {
+            let start = source
+                .find(&format!("pub async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} not found"));
+            let rest = &source[start..];
+            let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+            &rest[..end]
+        }
+        for (source, name, then) in [
+            (
+                include_str!("recovery.rs"),
+                "recovery_retry",
+                "spawn_blocking",
+            ),
+            (
+                include_str!("recovery.rs"),
+                "recovery_start_fresh",
+                "recovering()",
+            ),
+            (
+                include_str!("backup_cmd.rs"),
+                "backup_restore_commit",
+                "require_unlocked_or_recovering",
+            ),
+            (include_str!("lock.rs"), "lock_unlock_pin", "blocking("),
+            (
+                include_str!("lock.rs"),
+                "lock_unlock_biometric",
+                "blocking(",
+            ),
+        ] {
+            let text = body(source, name);
+            let taken = text
+                .find("storage_mutex()")
+                .unwrap_or_else(|| panic!("{name} does not take the storage mutex"));
+            let first = text.find(then).unwrap_or_else(|| panic!("{name}: {then}"));
+            assert!(taken < first, "{name} must take the mutex before {then}");
+        }
+        // The lifecycle hook and the synchronous lock helpers run on the main thread.
+        assert!(!include_str!("lib.rs").contains("storage_mutex"));
+        assert!(!include_str!("applock.rs").contains("storage_mutex"));
     }
 }

@@ -194,6 +194,9 @@ pub async fn lock_unlock_pin(
     app: AppHandle,
     pin: Zeroizing<String>,
 ) -> Result<LockStatusDto, AppError> {
+    // Opening the database must not interleave with a restore swapping the files.
+    let gate = app.state::<AppState>();
+    let _op = gate.storage_mutex().lock().await;
     blocking(&app, move |app| {
         let state = app.state::<AppState>();
         state.applock().verify_pin(&pin, Instant::now())?;
@@ -262,6 +265,7 @@ pub async fn lock_unlock_biometric(app: AppHandle) -> Result<LockStatusDto, AppE
             });
         }
     })?;
+    let _op = state.storage_mutex().lock().await;
     let app_for_open = app.clone();
     blocking(&app, move |_| open_and_unlock(&app_for_open)).await?;
     Ok(status_of(&app).await)

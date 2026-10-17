@@ -348,6 +348,8 @@ pub async fn backup_restore_commit(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CountsDto, AppError> {
+    // One storage operation at a time; a second commit finds nothing staged.
+    let _op = state.storage_mutex().lock().await;
     require_unlocked_or_recovering(&state)?;
     let recovering = state.recovering();
     // Replacing the data is destructive in both cases: a fresh PIN while a valid

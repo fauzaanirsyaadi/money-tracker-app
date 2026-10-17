@@ -87,6 +87,8 @@ pub fn initialize(app: &AppHandle, state: &AppState) {
 /// Tries again after a failure that may have passed.
 #[tauri::command]
 pub async fn recovery_retry(app: AppHandle) -> Result<LockStatusDto, AppError> {
+    let gate = app.state::<AppState>();
+    let _op = gate.storage_mutex().lock().await;
     let worker = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<AppState>();
@@ -111,6 +113,9 @@ pub async fn recovery_start_fresh(
     state: State<'_, AppState>,
     typed: String,
 ) -> Result<LockStatusDto, AppError> {
+    // One storage operation at a time. Everything below is checked after this,
+    // because a restore that finished meanwhile may have resolved the problem.
+    let _op = state.storage_mutex().lock().await;
     if !state.recovering() {
         return Err(AppError::invalid("there is nothing to recover"));
     }
