@@ -16,8 +16,12 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 # OS random bytes for the salt and nonce prefix. ISC/MIT/Apache-2.0, rust-random (already in the tree).
 getrandom = "0.3"
 # NFKC for passphrases, so the same text typed on different keyboards derives the same key.
-# MIT OR Apache-2.0, unicode-rs, maintained.
-unicode-normalization = "0.1"
+# MIT OR Apache-2.0, unicode-rs, maintained. **Pinned to an exact version on purpose**:
+# the backup key is derived from the normalised text, so a release that changed the
+# normalisation of any character would stop old backups opening with their own
+# passphrase. Move the pin only deliberately, with the fixed vectors in `lib.rs`
+# (`fixed_vectors`, checked against Python's `unicodedata`) still green.
+unicode-normalization = "=0.1.25"
 # Wipes derived keys and passphrase copies. Apache-2.0 OR MIT, RustCrypto, maintained.
 zeroize = "1"
 

@@ -919,4 +919,102 @@ mod tests {
             assert_eq!(validate_passphrase(passphrase), expected, "{name}");
         }
     }
+
+    // --- F24: the key must not drift with a library update ---------------------------
+    //
+    // The key is derived from the NFKC form of the passphrase. If a dependency
+    // update changed that form for any character, existing backups would stop
+    // opening with their own passphrase. So the expected NFKC text of each case
+    // below was produced by an *independent* implementation (Python's
+    // `unicodedata`, Unicode 16.0) and the derived keys are pinned; the crate is
+    // pinned to an exact version in Cargo.toml, and moving it must keep this test
+    // green.
+
+    const FIXED_SALT: &[u8; 16] = b"fixed-salt-16by!";
+
+    fn fixed_vectors() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+        vec![
+            (
+                "composed and decomposed e-acute differ in bytes",
+                "caf\u{e9} au lait 2026",
+                "caf\u{e9} au lait 2026",
+                "a167a8820ff6a87ca40556bf91c1c23c1c48ea1ffd0e0d92ca88fe0ec263a503",
+            ),
+            (
+                "decomposed",
+                "cafe\u{301} au lait 2026",
+                "caf\u{e9} au lait 2026",
+                "a167a8820ff6a87ca40556bf91c1c23c1c48ea1ffd0e0d92ca88fe0ec263a503",
+            ),
+            (
+                "full-width",
+                "\u{ff21}\u{ff22}\u{ff23}\u{ff11}\u{ff12}\u{ff13} kopi susu",
+                "ABC123 kopi susu",
+                "8fa8bb702980bba7cceaaae4c782e814132d26537ad0d822fc028e0e4ecf6ab5",
+            ),
+            (
+                "ffi ligature",
+                "\u{fb03}cient passphrase",
+                "fficient passphrase",
+                "14449abd866da5deb10d9eb9eb869e628ea9a3206e5eeadbad0dfc14a0db10c2",
+            ),
+            (
+                "U+FDFA expands",
+                "\u{fdfa} kata sandi panjang",
+                "\u{635}\u{644}\u{649} \u{627}\u{644}\u{644}\u{647} \u{639}\u{644}\u{64a}\u{647} \u{648}\u{633}\u{644}\u{645} kata sandi panjang",
+                "882f04b8ef34efbdae3d78449ee5f68553b691c797085b48ba3bd497a2f25988",
+            ),
+            (
+                "hangul jamo",
+                "\u{1112}\u{1161}\u{11ab} \u{ae00} passphrase",
+                "\u{d55c} \u{ae00} passphrase",
+                "29c33591be1b00b26b445e0ad25ee40812aa9dca5ccb5c9c4e38df9c293a7cc5",
+            ),
+            (
+                "superscript and circled",
+                "x\u{b2} + \u{2460} = benar",
+                "x2 + 1 = benar",
+                "2795186d4e0b2063a843ff6f40b39819f28d6f34695027de48dfa666cdc02533",
+            ),
+            (
+                "half-width katakana",
+                "\u{ff76}\u{ff80}\u{ff76}\u{ff85} kata sandi",
+                "\u{30ab}\u{30bf}\u{30ab}\u{30ca} kata sandi",
+                "a46b0c8eb8f47baa6d1a531a54968777b44215ca8ecdd53e4dca9f079c352a85",
+            ),
+            (
+                "ohm and angstrom signs",
+                "\u{2126} \u{212b} kata sandi",
+                "\u{3a9} \u{c5} kata sandi",
+                "32d29b6b749e36a28dfc2dd4d93b11bebce49b3f5b4952116ccfa597ecc3160b",
+            ),
+            (
+                "roman numeral and dz digraph",
+                "\u{2163} \u{1c6} kata sandi",
+                "IV d\u{17e} kata sandi",
+                "ac9162ba4ea0bd8f1aa1ea330ebd7ed55bb963e1f9a3fd990832a454f62dbbc1",
+            ),
+        ]
+    }
+
+    #[test]
+    fn nfkc_matches_an_independent_implementation_for_the_fixed_vectors() {
+        for (name, typed, expected, _) in fixed_vectors() {
+            assert_eq!(normalize(typed).as_str(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_derived_key_is_pinned_for_the_fixed_vectors() {
+        for (name, typed, expected, key_hex) in fixed_vectors() {
+            let from_typed = derive_key(typed, FIXED_SALT, KdfParams::for_tests()).unwrap();
+            let from_nfkc = derive_key(expected, FIXED_SALT, KdfParams::for_tests()).unwrap();
+            assert_eq!(
+                *from_typed, *from_nfkc,
+                "{name}: typed and normalised forms must agree"
+            );
+            let hex: String = from_typed.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, key_hex, "{name}");
+        }
+    }
 }
