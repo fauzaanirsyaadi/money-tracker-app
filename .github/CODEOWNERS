@@ -5,6 +5,7 @@
 # Replace the placeholder with your GitHub username before pushing.
 *                                   @REPLACE-WITH-GITHUB-USERNAME
 /.github/workflows/                 @REPLACE-WITH-GITHUB-USERNAME
+/.github/actions/                   @REPLACE-WITH-GITHUB-USERNAME
 /.github/CODEOWNERS                 @REPLACE-WITH-GITHUB-USERNAME
 /scripts/                           @REPLACE-WITH-GITHUB-USERNAME
 /scripts/guard_exceptions.json      @REPLACE-WITH-GITHUB-USERNAME

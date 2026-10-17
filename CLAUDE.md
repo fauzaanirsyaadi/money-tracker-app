@@ -23,4 +23,4 @@ Personal finance app. Android first, local-only mode. Stack: Tauri 2, Rust, Svel
 - A guard (`scripts/check_*.py`) is only ever told to look away through `scripts/guard_exceptions.json`, with a reason. Inline marker comments (`debug-safe:`, `offline-check: allow`) are refused and reported.
 - Tauri capabilities are an allow-list (`ALLOWED_CAPABILITY_PERMISSIONS` in `scripts/check_offline.py`), read from `.json`, `.json5`, `.toml` files and inline in `tauri.conf.json`. A permission that is not listed fails CI; a file the guard cannot parse fails CI.
 - Every GitHub Action is pinned to a full commit SHA (`scripts/check_workflows.py`). Bump a pin on purpose, with the tag in the trailing comment.
-- `.github/CODEOWNERS` covers the workflows, `scripts/`, the exceptions file and `deny.toml`.
+- `.github/CODEOWNERS` has a rule of its own for the workflows, composite actions, `scripts/`, the exceptions file and `deny.toml` (a catch-all `*` does not count). The placeholder owner is a warning locally and **fails CI**: put the real GitHub username in before the first push.
