@@ -101,8 +101,13 @@ jobs:
       - name: Install Android SDK packages
         run: |
           # sdkmanager is installed but not on PATH on the runner image.
-          sdkmanager=$(ls "${ANDROID_HOME}"/cmdline-tools/latest/bin/sdkmanager "${ANDROID_HOME}"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
-          test -x "$sdkmanager"
+          sdkmanager=$(find "${ANDROID_HOME}/cmdline-tools" -path '*/bin/sdkmanager' 2>/dev/null | sort | tail -1 || true)
+          if [ -z "$sdkmanager" ]; then
+            echo "sdkmanager not found; ANDROID_HOME=${ANDROID_HOME}"
+            ls -la "${ANDROID_HOME}" "${ANDROID_HOME}/cmdline-tools" || true
+            exit 1
+          fi
+          echo "using $sdkmanager"
           yes | "$sdkmanager" --licenses > /dev/null || true
           "$sdkmanager" --install "platforms;android-37" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
