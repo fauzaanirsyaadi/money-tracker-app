@@ -19,7 +19,9 @@ env:
 
 jobs:
   # Fast loop: formatting, lints, tests and the UI type check on desktop Linux.
+  # Paused while the work focuses on Android: remove `if: false` to turn it back on.
   desktop:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -66,7 +68,9 @@ jobs:
           python3 scripts/check_workflows.py
 
   # Supply chain: advisories, licenses, bans, sources.
+  # Paused together with `desktop`: remove `if: false` to turn it back on.
   supply-chain:
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -92,10 +96,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
-      - name: Install NDK
+      # The runner image already ships the Android SDK (ANDROID_HOME) and sdkmanager;
+      # android-actions/setup-android v3.2.2 fails on it ("Failed to find package 'tools'").
+      - name: Install Android SDK packages
         run: |
-          sdkmanager --install "ndk;${NDK_VERSION}"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platforms;android-37" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

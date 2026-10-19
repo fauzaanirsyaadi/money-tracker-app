@@ -27,4 +27,5 @@ codegen-units = 1
 lto = true
 opt-level = 3
 panic = "abort"
-strip = true
+# Keep the symbol table: the Android build extracts it for Play Console, then strips the APK.
+strip = "debuginfo"
