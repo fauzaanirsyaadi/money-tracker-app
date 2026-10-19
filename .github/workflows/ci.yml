@@ -109,7 +109,7 @@ jobs:
           fi
           echo "using $sdkmanager"
           yes | "$sdkmanager" --licenses > /dev/null || true
-          "$sdkmanager" --install "platforms;android-37" "ndk;${NDK_VERSION}"
+          "$sdkmanager" --install "platforms;android-37.0" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Link NDK llvm-ar/llvm-ranlib under the target-prefixed names
         # openssl-src builds OpenSSL from source and calls <triple>-ar / <triple>-ranlib,
