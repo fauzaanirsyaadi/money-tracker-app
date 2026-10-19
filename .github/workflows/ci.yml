@@ -103,6 +103,19 @@ jobs:
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager --install "platforms;android-37" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: Link NDK llvm-ar/llvm-ranlib under the target-prefixed names
+        # openssl-src builds OpenSSL from source and calls <triple>-ar / <triple>-ranlib,
+        # which current NDKs only ship as llvm-ar / llvm-ranlib.
+        run: |
+          bin="${ANDROID_HOME}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          tools="${RUNNER_TEMP}/ndk-tools"
+          mkdir -p "$tools"
+          for triple in aarch64-linux-android arm-linux-androideabi i686-linux-android x86_64-linux-android; do
+            for tool in ar ranlib; do
+              ln -sf "$bin/llvm-$tool" "$tools/$triple-$tool"
+            done
+          done
+          echo "$tools" >> "$GITHUB_PATH"
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
