@@ -8,7 +8,7 @@ Draf untuk disalin ke Play Console. Sesuaikan jika fitur berubah.
 | Nama aplikasi (maks. 30) | `Money Tracker` |
 | Kategori | Keuangan |
 | Tag | Pelacak keuangan, anggaran |
-| Email kontak | **[ISI]** |
+| Email kontak | fauzaan.work@gmail.com |
 | Situs web | (opsional) `https://github.com/fauzaanirsyaadi/money-tracker-app` |
 | Kebijakan privasi | URL halaman `PRIVACY_POLICY.md` (lihat catatan di bawah) |
 

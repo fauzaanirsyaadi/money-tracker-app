@@ -50,7 +50,7 @@ Jika kebijakan ini berubah, versi baru dipublikasikan di alamat yang sama dengan
 
 ## Kontak
 
-Pertanyaan tentang privasi: **[ISI EMAIL KONTAK ANDA]**
+Pertanyaan tentang privasi: **fauzaan.work@gmail.com**
 
 ---
 
@@ -77,4 +77,4 @@ Money Tracker is a personal finance tracker for Android that **runs entirely on 
 
 **Children:** the app is intended for adults.
 
-**Contact:** **[ADD YOUR CONTACT EMAIL]**
+**Contact:** **fauzaan.work@gmail.com**
