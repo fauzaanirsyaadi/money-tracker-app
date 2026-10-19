@@ -1,7 +1,7 @@
 // A tiny, self-instrumenting test driver for the device scripts in ../../scripts.
 //
 // It is NOT part of the app and is never shipped: it is a separate APK
-// (com.moneytracker.uia) whose instrumentation targets itself, so running it does
+// (io.github.fauzaanirsyaadi.moneytracker.uia) whose instrumentation targets itself, so running it does
 // not restart or touch the app under test. It exists because real key events sent
 // with `adb input text` get dropped when the emulator is busy, whereas the
 // accessibility API sets a field's text atomically.
@@ -13,11 +13,11 @@ plugins {
 }
 
 android {
-    namespace = "com.moneytracker.uia"
+    namespace = "io.github.fauzaanirsyaadi.moneytracker.uia"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.moneytracker.uia"
+        applicationId = "io.github.fauzaanirsyaadi.moneytracker.uia"
         minSdk = 24
         targetSdk = 36
         versionCode = 1

@@ -1,7 +1,7 @@
 // Node side of tools/uia-driver: sets a field's text (or clicks, waits) through the
 // accessibility API instead of `adb input text`, which drops key events when the
 // emulator is busy. The driver is a separate, self-instrumenting APK
-// (com.moneytracker.uia); it is built and installed on first use and never touches
+// (io.github.fauzaanirsyaadi.moneytracker.uia); it is built and installed on first use and never touches
 // the app under test.
 //
 //   import { createUia } from "./uia.mjs";
@@ -13,18 +13,18 @@ import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 
-const RUNNER = "com.moneytracker.uia/androidx.test.runner.AndroidJUnitRunner";
+const RUNNER = "io.github.fauzaanirsyaadi.moneytracker.uia/androidx.test.runner.AndroidJUnitRunner";
 
 export function createUia(adb, { root }) {
   const apk = path.join(root, "tools/uia-driver/build/outputs/apk/debug/uia-driver-debug.apk");
   const gradlew = path.join(root, "src-tauri/gen/android/gradlew");
 
-  const installed = () => adb("shell", "pm", "list", "instrumentation").includes("com.moneytracker.uia");
+  const installed = () => adb("shell", "pm", "list", "instrumentation").includes("io.github.fauzaanirsyaadi.moneytracker.uia");
 
   return {
     /** Builds the driver when missing or older than its source, and (re)installs it. */
     ensure() {
-      const source = path.join(root, "tools/uia-driver/src/main/java/com/moneytracker/uia/UiaDriver.kt");
+      const source = path.join(root, "tools/uia-driver/src/main/java/io/github/fauzaanirsyaadi/moneytracker/uia/UiaDriver.kt");
       const stale = existsSync(apk) && statSync(source).mtimeMs > statSync(apk).mtimeMs;
       if (!existsSync(apk) || stale) {
         execFileSync(gradlew, ["-p", path.join(root, "tools/uia-driver"), "assembleDebug", "--console=plain", "-q"], {
@@ -44,7 +44,7 @@ export function createUia(adb, { root }) {
       }
       const extra = Object.entries(args).flatMap(([key, value]) => ["-e", key, String(value)]);
       const output = adb(
-        "shell", "am", "instrument", "-w", "-e", "class", "com.moneytracker.uia.UiaDriver",
+        "shell", "am", "instrument", "-w", "-e", "class", "io.github.fauzaanirsyaadi.moneytracker.uia.UiaDriver",
         "-e", "action", action, ...extra, RUNNER,
       );
       const result = /INSTRUMENTATION_STATUS: result=(.*)/.exec(output);

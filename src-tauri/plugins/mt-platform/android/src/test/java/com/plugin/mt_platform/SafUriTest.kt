@@ -53,13 +53,13 @@ class SafUriTest {
         assertFalse(ok("content", own))
         assertFalse(ok("content", "$own.fileprovider"))
         assertFalse(ok("content", "$own.anything.else"))
-        assertFalse(ok("content", "COM.MONEYTRACKER.APP"))
+        assertFalse(ok("content", "IO.GITHUB.FAUZAANIRSYAADI.MONEYTRACKER"))
         // User info and port do not hide it.
         assertFalse(ok("content", "0@$own.fileprovider"))
         assertFalse(ok("content", "0@$own:8080"))
         // A different package that merely starts with our name is another app.
-        assertTrue(ok("content", "com.moneytracker.application"))
-        assertTrue(ok("content", "com.moneytracker.app2.provider"))
+        assertTrue(ok("content", "io.github.fauzaanirsyaadi.moneytrackerapp"))
+        assertTrue(ok("content", "io.github.fauzaanirsyaadi.moneytracker2.provider"))
     }
 
     @Test

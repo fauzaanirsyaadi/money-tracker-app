@@ -1,4 +1,4 @@
-package com.moneytracker.uia
+package io.github.fauzaanirsyaadi.moneytracker.uia
 
 import android.os.Bundle
 import androidx.test.platform.app.InstrumentationRegistry

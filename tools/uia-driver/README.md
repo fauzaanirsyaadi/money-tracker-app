@@ -1,6 +1,6 @@
 # uia-driver (experiment, not part of the app)
 
-A self-instrumenting test APK (`com.moneytracker.uia`) that sets a field's text through
+A self-instrumenting test APK (`io.github.fauzaanirsyaadi.moneytracker.uia`) that sets a field's text through
 the accessibility API (UiAutomator) instead of `adb input text`. Built and used only by
 `scripts/android_smoke.mjs --uia` on an **emulator or test device**.
 
