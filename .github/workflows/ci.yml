@@ -100,8 +100,11 @@ jobs:
       # android-actions/setup-android v3.2.2 fails on it ("Failed to find package 'tools'").
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platforms;android-37" "ndk;${NDK_VERSION}"
+          # sdkmanager is installed but not on PATH on the runner image.
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" --install "platforms;android-37" "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Link NDK llvm-ar/llvm-ranlib under the target-prefixed names
         # openssl-src builds OpenSSL from source and calls <triple>-ar / <triple>-ranlib,
