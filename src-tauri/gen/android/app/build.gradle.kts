@@ -16,10 +16,10 @@ val tauriProperties = Properties().apply {
 
 android {
     compileSdk = 37
-    namespace = "com.moneytracker.app"
+    namespace = "io.github.fauzaanirsyaadi.moneytracker"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.moneytracker.app"
+        applicationId = "io.github.fauzaanirsyaadi.moneytracker"
         minSdk = 24
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

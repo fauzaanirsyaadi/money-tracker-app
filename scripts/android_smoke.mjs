@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import { createUia } from "./uia.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGE = "com.moneytracker.app";
+const PACKAGE = "io.github.fauzaanirsyaadi.moneytracker";
 const ACTIVITY = `${PACKAGE}/.MainActivity`;
 const PORT = 9222;
 
@@ -300,7 +300,7 @@ async function main() {
   check("no ANR dialog on screen", !/Application Not Responding/i.test(dialogs));
 
   const windows = adb("shell", "dumpsys", "window", "windows");
-  const main = /Window #\d+ Window\{[^}]*com\.moneytracker\.app\/[^}]*\}:\n\s+(?:.*\n)*?\s+fl=([^\n]*)/.exec(windows);
+  const main = /Window #\d+ Window\{[^}]*io\.github\.fauzaanirsyaadi\.moneytracker\/[^}]*\}:\n\s+(?:.*\n)*?\s+fl=([^\n]*)/.exec(windows);
   check("FLAG_SECURE is set on the main window", /\bSECURE\b/.test(main?.[1] ?? ""), main?.[1]?.slice(0, 60));
 
   if (flag("--lock")) await lockFlow(top, dpr);

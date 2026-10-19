@@ -30,7 +30,7 @@ class ManifestTests(unittest.TestCase):
             return guard.check_manifest(path)
 
     def test_clean_release_manifest_passes(self):
-        xml = manifest(["com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"])
+        xml = manifest(["io.github.fauzaanirsyaadi.moneytracker.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"])
         self.assertEqual(self.run_manifest(xml), [])
 
     def test_biometric_permissions_are_allowed_but_network_still_is_not(self):
@@ -38,7 +38,7 @@ class ManifestTests(unittest.TestCase):
             [
                 "android.permission.USE_BIOMETRIC",
                 "android.permission.USE_FINGERPRINT",
-                "com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+                "io.github.fauzaanirsyaadi.moneytracker.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
             ]
         )
         self.assertEqual(self.run_manifest(ok), [])
@@ -75,11 +75,11 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(self.run_manifest(manifest(dataExtractionRules=None)))
 
 
-PERMISSIONS_OK = """package: com.moneytracker.app
+PERMISSIONS_OK = """package: io.github.fauzaanirsyaadi.moneytracker
 uses-permission: name='android.permission.USE_BIOMETRIC'
 uses-permission: name='android.permission.USE_FINGERPRINT'
-permission: com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
-uses-permission: name='com.moneytracker.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
+permission: io.github.fauzaanirsyaadi.moneytracker.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+uses-permission: name='io.github.fauzaanirsyaadi.moneytracker.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'
 """
 
 TREE_OK = """N: android=http://schemas.android.com/apk/res/android (line=2)

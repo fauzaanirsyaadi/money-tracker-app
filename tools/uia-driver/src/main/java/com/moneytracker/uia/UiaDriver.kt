@@ -28,7 +28,7 @@ import org.junit.Test
 class UiaDriver {
     private val args: Bundle = InstrumentationRegistry.getArguments()
     private val device: UiDevice = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
-    private val target: String = args.getString("pkg") ?: "com.moneytracker.app"
+    private val target: String = args.getString("pkg") ?: "io.github.fauzaanirsyaadi.moneytracker"
 
     private fun report(key: String, value: String) {
         val bundle = Bundle()

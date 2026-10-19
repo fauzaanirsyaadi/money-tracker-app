@@ -906,7 +906,7 @@ Angka perangkat kelas bawah menunggu Fase 8.
 | Kerusakan di tengah berkas awalnya dilaporkan sebagai "frasa sandi salah" bila seluruh isi muat satu potongan | Hanya potongan pertama yang membedakan; kerusakan sesudahnya dilaporkan sebagai **cadangan rusak**. Tes memakai banyak potongan |
 | Hitungan baris setelah migrasi naik karena migrasi menyemai data baru | Jumlah baris dibandingkan **sebelum** migrasi naik; saldo sesudahnya |
 | Jam dinding host melompat berjam-jam di antara beberapa pemanggilan (host/sandbox tertahan), tampak seperti `adb install` macet 15 menit | Bukan galat aplikasi; batas waktu skrip E2E dilonggarkan (240 dtk per picker) |
-| Satu ANR `com.moneytracker.app` saat mengetik di smoke test, ketika load host 8–12 | Jejak: thread utama menunggu `ThreadedRenderer.syncAndDrawFrame` (render thread/GPU emulator), bukan kode aplikasi, sama dengan temuan Fase 6. Lulus pada ulangan dengan host lebih tenang. Perlu dipantau di perangkat nyata (Fase 8) |
+| Satu ANR `io.github.fauzaanirsyaadi.moneytracker` saat mengetik di smoke test, ketika load host 8–12 | Jejak: thread utama menunggu `ThreadedRenderer.syncAndDrawFrame` (render thread/GPU emulator), bukan kode aplikasi, sama dengan temuan Fase 6. Lulus pada ulangan dengan host lebih tenang. Perlu dipantau di perangkat nyata (Fase 8) |
 | Emulator menjadi lamban setelah uji reboot (ANR Pixel Launcher/System UI) | Emulator dimulai ulang dingin; tidak terkait aplikasi |
 
 ---
@@ -1172,7 +1172,7 @@ Catatan jujur: SHA di atas diambil dari `git ls-remote` ke repositori masing-mas
 | Dekripsi + restore + verifikasi 100 ribu baris | 1,7 s | |
 | Mulai dingin, APK rilis, emulator arm64 Android 15 (`am start -W`, 5 kali, setelah diukur ulang dengan penanda waktu sementara) | 1,8 / 2,1 / 2,3 / 2,4 / 2,7 s | **Koreksi:** pengukuran pertama saya menulis "sebagian besar inisialisasi WebView" tanpa bukti. Setelah diukur, `setup` Rust adalah bagian terbesar: **1,1-2,1 s** dari 1,8-2,7 s. Di dalamnya `app_data_dir()` saja **0,75-1,4 s** (menunggu thread utama Kotlin yang sedang sibuk membuat Activity), lalu `initialize` (unwrap Keystore + buka DB) sekitar 0,35-0,8 s. `LockService::load` dan `clean_leftovers` hanya puluhan milidetik. Belum dioptimalkan (lihat usulan di bawah) |
 
-**Belum terbukti pada perangkat kelas bawah.** Argon2 terikat memori dan CPU; waktu di ponsel murah dapat 5-20 kali angka host. Ukur di perangkat nyata: waktu buka kunci (harus tetap di bawah sekitar 1 detik), ekspor (KDF 64 MiB), dan mulai dingin. Perintah mulai dingin: `adb shell am force-stop com.moneytracker.app; adb shell am start -W -n com.moneytracker.app/.MainActivity`.
+**Belum terbukti pada perangkat kelas bawah.** Argon2 terikat memori dan CPU; waktu di ponsel murah dapat 5-20 kali angka host. Ukur di perangkat nyata: waktu buka kunci (harus tetap di bawah sekitar 1 detik), ekspor (KDF 64 MiB), dan mulai dingin. Perintah mulai dingin: `adb shell am force-stop io.github.fauzaanirsyaadi.moneytracker; adb shell am start -W -n io.github.fauzaanirsyaadi.moneytracker/.MainActivity`.
 
 ### APK rilis untuk HP nyata
 

@@ -1,4 +1,4 @@
-package com.moneytracker.app
+package io.github.fauzaanirsyaadi.moneytracker
 
 import android.content.pm.ApplicationInfo
 import android.os.Bundle

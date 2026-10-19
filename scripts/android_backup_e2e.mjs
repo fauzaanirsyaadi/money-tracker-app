@@ -20,7 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGE = "com.moneytracker.app";
+const PACKAGE = "io.github.fauzaanirsyaadi.moneytracker";
 const ACTIVITY = `${PACKAGE}/.MainActivity`;
 const PORT = 9222;
 const PASSPHRASE = "kopi susu gula aren enak";

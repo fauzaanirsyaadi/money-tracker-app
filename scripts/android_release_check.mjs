@@ -18,7 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGE = "com.moneytracker.app";
+const PACKAGE = "io.github.fauzaanirsyaadi.moneytracker";
 const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
 if (!sdk) throw new Error("set ANDROID_HOME");
 
@@ -69,7 +69,7 @@ adb("shell", "am", "start", "-n", `${PACKAGE}/.MainActivity`, "--ez", "mt_insecu
 await sleep(8000);
 
 const windows = adb("shell", "dumpsys", "window", "windows");
-const main = /Window #\d+ Window\{[^}]*com\.moneytracker\.app\/[^}]*\}:\n\s+(?:.*\n)*?\s+fl=([^\n]*)/.exec(windows);
+const main = /Window #\d+ Window\{[^}]*io\.github\.fauzaanirsyaadi\.moneytracker\/[^}]*\}:\n\s+(?:.*\n)*?\s+fl=([^\n]*)/.exec(windows);
 const flags = main?.[1] ?? "";
 check("main window found", main !== null);
 check("FLAG_SECURE is set although mt_insecure was passed", /\bSECURE\b/.test(flags), flags.slice(0, 80));

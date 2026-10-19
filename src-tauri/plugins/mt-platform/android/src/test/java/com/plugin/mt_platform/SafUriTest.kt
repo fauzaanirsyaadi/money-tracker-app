@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SafUriTest {
-    private val own = "com.moneytracker.app"
+    private val own = "io.github.fauzaanirsyaadi.moneytracker"
 
     private fun ok(scheme: String?, authority: String?) = SafUri.isAcceptable(scheme, authority, own)
 
@@ -26,7 +26,7 @@ class SafUriTest {
 
     @Test
     fun fileUrisAreRejectedWhateverTheyPointAt() {
-        // file:///data/user/0/com.moneytracker.app/files/db.key has no authority.
+        // file:///data/user/0/io.github.fauzaanirsyaadi.moneytracker/files/db.key has no authority.
         assertFalse(ok("file", null))
         assertFalse(ok("file", ""))
         assertFalse(ok("FILE", "localhost"))
